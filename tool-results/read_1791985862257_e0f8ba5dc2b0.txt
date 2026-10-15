@@ -1,0 +1,1057 @@
+     1→"use client";
+     2→
+     3→import { useState, useRef, useEffect, useCallback } from "react";
+     4→import {
+     5→  Wallet,
+     6→  Plus,
+     7→  AlertCircle,
+     8→  Loader2,
+     9→  RefreshCw,
+    10→  ArrowDownCircle,
+    11→  ArrowUpCircle,
+    12→  TrendingUp,
+    13→  TrendingDown,
+    14→  Calendar,
+    15→  Receipt,
+    16→  MessageCircle,
+    17→  Copy,
+    18→  Check,
+    19→} from "lucide-react";
+    20→import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+    21→import { Button } from "@/components/ui/button";
+    22→import { Badge } from "@/components/ui/badge";
+    23→import { Label } from "@/components/ui/label";
+    24→import { Input } from "@/components/ui/input";
+    25→import { Textarea } from "@/components/ui/textarea";
+    26→import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+    27→import {
+    28→  Dialog,
+    29→  DialogContent,
+    30→  DialogDescription,
+    31→  DialogFooter,
+    32→  DialogHeader,
+    33→  DialogTitle,
+    34→} from "@/components/ui/dialog";
+    35→import { CSRF_HEADER } from "@/lib/auth/csrf";
+    36→import { toast } from "@/hooks/use-toast";
+    37→
+    38→// ============================================================================
+    39→// Types
+    40→// ============================================================================
+    41→
+    42→interface AcademyPayment {
+    43→  id: string;
+    44→  studentId: string;
+    45→  studentName: string;
+    46→  payerName: string | null;
+    47→  paymentMethod: string;
+    48→  amount: string; // numeric(12,2) as string
+    49→  paymentDate: string;
+    50→  referenceNumber: string | null;
+    51→  notes: string | null;
+    52→  status: string;
+    53→  packageId: string | null;
+    54→  packageName: string | null;
+    55→  sessionCount: number | null;
+    56→  recordedAt: string;
+    57→}
+    58→
+    59→interface ExpenseRow {
+    60→  id: string;
+    61→  amount: string;
+    62→  category: string;
+    63→  incurredOn: string;
+    64→  note: string | null;
+    65→  relatedPaymentId: string | null;
+    66→  createdBy: string;
+    67→  createdAt: string;
+    68→}
+    69→
+    70→interface PackagePlan {
+    71→  id: string;
+    72→  name: string;
+    73→  sessionCount: number;
+    74→  isActive: boolean;
+    75→}
+    76→
+    77→interface Student {
+    78→  id: string;
+    79→  full_name: string;
+    80→}
+    81→
+    82→/** Raw shape returned by GET /api/admin/package-plans (snake_case from DB). */
+    83→interface PackagePlanApi {
+    84→  id: string;
+    85→  name: string;
+    86→  session_count: number;
+    87→  is_active: boolean;
+    88→}
+    89→
+    90→function mapPlan(p: PackagePlanApi): PackagePlan {
+    91→  return {
+    92→    id: p.id,
+    93→    name: p.name,
+    94→    sessionCount: p.session_count,
+    95→    isActive: p.is_active,
+    96→  };
+    97→}
+    98→
+    99→interface DashboardSummary {
+   100→  finances: {
+   101→    monthPaymentTotal: string;
+   102→    monthExpenseTotal: string;
+   103→  };
+   104→  monthStart: string;
+   105→  monthEnd: string;
+   106→}
+   107→
+   108→type PaymentsState =
+   109→  | { status: "loading" }
+   110→  | { status: "error"; message: string }
+   111→  | { status: "success"; data: AcademyPayment[] };
+   112→
+   113→type ExpensesState =
+   114→  | { status: "loading" }
+   115→  | { status: "error"; message: string }
+   116→  | { status: "success"; data: ExpenseRow[] };
+   117→
+   118→// ============================================================================
+   119→// Helpers
+   120→// ============================================================================
+   121→
+   122→/** Today's date in Asia/Jakarta (UTC+7), as YYYY-MM-DD. */
+   123→function jakartaTodayYmd(): string {
+   124→  const shifted = new Date(Date.now() + 7 * 60 * 60 * 1000);
+   125→  const y = shifted.getUTCFullYear();
+   126→  const m = String(shifted.getUTCMonth() + 1).padStart(2, "0");
+   127→  const d = String(shifted.getUTCDate()).padStart(2, "0");
+   128→  return `${y}-${m}-${d}`;
+   129→}
+   130→
+   131→/** First day of the current month in Jakarta, YYYY-MM-DD. */
+   132→function jakartaMonthStart(): string {
+   133→  const shifted = new Date(Date.now() + 7 * 60 * 60 * 1000);
+   134→  const y = shifted.getUTCFullYear();
+   135→  const m = String(shifted.getUTCMonth() + 1).padStart(2, "0");
+   136→  return `${y}-${m}-01`;
+   137→}
+   138→
+   139→/** First day of next month in Jakarta (exclusive upper bound). */
+   140→function jakartaMonthEnd(): string {
+   141→  const shifted = new Date(Date.now() + 7 * 60 * 60 * 1000);
+   142→  let y = shifted.getUTCFullYear();
+   143→  let m = shifted.getUTCMonth() + 1; // 1-12
+   144→  if (m === 12) {
+   145→    m = 1;
+   146→    y += 1;
+   147→  } else {
+   148→    m += 1;
+   149→  }
+   150→  return `${y}-${String(m).padStart(2, "0")}-01`;
+   151→}
+   152→
+   153→/** Format an IDR amount string (e.g. "500000.00") as "Rp 500.000". */
+   154→function formatRupiah(amountStr: string): string {
+   155→  const n = Number(amountStr);
+   156→  if (Number.isNaN(n)) return `Rp ${amountStr}`;
+   157→  return `Rp ${n.toLocaleString("id-ID", { maximumFractionDigits: 0 })}`;
+   158→}
+   159→
+   160→/** Format a YYYY-MM-DD as "DD Mon YYYY". */
+   161→function formatDateShort(ymd: string): string {
+   162→  const d = new Date(`${ymd}T00:00:00.000Z`);
+   163→  if (Number.isNaN(d.getTime())) return ymd;
+   164→  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+   165→  return `${String(d.getUTCDate()).padStart(2, "0")} ${months[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
+   166→}
+   167→
+   168→async function adminFetch(url: string, method: string, body?: unknown): Promise<Response> {
+   169→  const csrfMatch = document.cookie.split("; ").find((c) => c.startsWith("futsal_csrf="));
+   170→  const csrfToken = csrfMatch?.split("=")[1] ?? "";
+   171→  return fetch(url, {
+   172→    method,
+   173→    credentials: "same-origin",
+   174→    headers: {
+   175→      "Content-Type": "application/json",
+   176→      [CSRF_HEADER]: csrfToken,
+   177→    },
+   178→    body: body !== undefined ? JSON.stringify(body) : undefined,
+   179→  });
+   180→}
+   181→
+   182→// ============================================================================
+   183→// Main component
+   184→// ============================================================================
+   185→
+   186→export function PaymentsManagement({ academyId }: { academyId: string }) {
+   187→  const [fromDate, setFromDate] = useState<string>(jakartaMonthStart());
+   188→  const [toDate, setToDate] = useState<string>(jakartaTodayYmd());
+   189→  const [payments, setPayments] = useState<PaymentsState>({ status: "loading" });
+   190→  const [expenses, setExpenses] = useState<ExpensesState>({ status: "loading" });
+   191→  const [summary, setSummary] = useState<DashboardSummary | null>(null);
+   192→  const [showRecordPayment, setShowRecordPayment] = useState(false);
+   193→  const [showRecordExpense, setShowRecordExpense] = useState(false);
+   194→  const academyIdRef = useRef(academyId);
+   195→  useEffect(() => {
+   196→    academyIdRef.current = academyId;
+   197→  }, [academyId]);
+   198→
+   199→  // Request-ordering token: incremented on each fetchAll/effect-fetch
+   200→  // call. Before applying a response, check if this token still matches
+   201→  // the latest value. If a newer request has started, the stale response
+   202→  // is discarded. This prevents an older (slower) request from
+   203→  // overwriting newer data — e.g., a post-mutation refetch racing a
+   204→  // date-range change, or a manual Refresh racing the deps-change fetch.
+   205→  // Mirrors the RegistrationsManagement pattern (Phase B3.3.2).
+   206→  const requestIdRef = useRef(0);
+   207→
+   208→  const fetchAll = useCallback(async () => {
+   209→    const aid = academyId;
+   210→    const from = fromDate;
+   211→    const to = toDate;
+   212→    const myRequestId = ++requestIdRef.current;
+   213→    setPayments({ status: "loading" });
+   214→    setExpenses({ status: "loading" });
+   215→    try {
+   216→      const [payRes, expRes, sumRes] = await Promise.all([
+   217→        fetch(`/api/admin/payments?academyId=${aid}&fromDate=${from}&toDate=${to}`, { credentials: "same-origin" }),
+   218→        fetch(`/api/admin/expenses?academyId=${aid}&fromDate=${from}&toDate=${to}`, { credentials: "same-origin" }),
+   219→        fetch(`/api/admin/dashboard/summary?academyId=${aid}`, { credentials: "same-origin" }),
+   220→      ]);
+   221→      // Stale-response guard: if a newer request started, discard this.
+   222→      if (myRequestId !== requestIdRef.current) return;
+   223→      if (aid !== academyIdRef.current) return;
+   224→      const payData = (await payRes.json()) as { payments?: AcademyPayment[]; error?: { message?: string } };
+   225→      if (!payRes.ok || !payData.payments) {
+   226→        setPayments({ status: "error", message: payData.error?.message ?? `Error ${payRes.status}` });
+   227→      } else {
+   228→        setPayments({ status: "success", data: payData.payments });
+   229→      }
+   230→      const expData = (await expRes.json()) as { expenses?: ExpenseRow[]; error?: { message?: string } };
+   231→      if (!expRes.ok || !expData.expenses) {
+   232→        setExpenses({ status: "error", message: expData.error?.message ?? `Error ${expRes.status}` });
+   233→      } else {
+   234→        setExpenses({ status: "success", data: expData.expenses });
+   235→      }
+   236→      if (sumRes.ok) {
+   237→        const sumData = (await sumRes.json()) as DashboardSummary;
+   238→        if (myRequestId === requestIdRef.current && aid === academyIdRef.current) setSummary(sumData);
+   239→      }
+   240→    } catch {
+   241→      if (myRequestId !== requestIdRef.current) return;
+   242→      if (aid !== academyIdRef.current) return;
+   243→      setPayments({ status: "error", message: "Network error" });
+   244→      setExpenses({ status: "error", message: "Network error" });
+   245→    }
+   246→  }, [academyId, fromDate, toDate]);
+   247→
+   248→  useEffect(() => {
+   249→    if (!academyId) return;
+   250→    const myRequestId = ++requestIdRef.current;
+   251→    let cancelled = false;
+   252→    void (async () => {
+   253→      try {
+   254→        const [payRes, expRes, sumRes] = await Promise.all([
+   255→          fetch(`/api/admin/payments?academyId=${academyId}&fromDate=${fromDate}&toDate=${toDate}`, { credentials: "same-origin" }),
+   256→          fetch(`/api/admin/expenses?academyId=${academyId}&fromDate=${fromDate}&toDate=${toDate}`, { credentials: "same-origin" }),
+   257→          fetch(`/api/admin/dashboard/summary?academyId=${academyId}`, { credentials: "same-origin" }),
+   258→        ]);
+   259→        if (cancelled || myRequestId !== requestIdRef.current) return;
+   260→        const payData = (await payRes.json()) as { payments?: AcademyPayment[]; error?: { message?: string } };
+   261→        if (!payRes.ok || !payData.payments) {
+   262→          setPayments({ status: "error", message: payData.error?.message ?? `Error ${payRes.status}` });
+   263→        } else {
+   264→          setPayments({ status: "success", data: payData.payments });
+   265→        }
+   266→        const expData = (await expRes.json()) as { expenses?: ExpenseRow[]; error?: { message?: string } };
+   267→        if (!expRes.ok || !expData.expenses) {
+   268→          setExpenses({ status: "error", message: expData.error?.message ?? `Error ${expRes.status}` });
+   269→        } else {
+   270→          setExpenses({ status: "success", data: expData.expenses });
+   271→        }
+   272→        if (sumRes.ok) {
+   273→          const sumData = (await sumRes.json()) as DashboardSummary;
+   274→          if (!cancelled && myRequestId === requestIdRef.current) setSummary(sumData);
+   275→        }
+   276→      } catch {
+   277→        if (cancelled || myRequestId !== requestIdRef.current) return;
+   278→        setPayments({ status: "error", message: "Network error" });
+   279→        setExpenses({ status: "error", message: "Network error" });
+   280→      }
+   281→    })();
+   282→    return () => {
+   283→      cancelled = true;
+   284→    };
+   285→  }, [academyId, fromDate, toDate]);
+   286→
+   287→  // Compute net total from the loaded payments + expenses in the selected range.
+   288→  const totalIncome =
+   289→    payments.status === "success"
+   290→      ? payments.data.reduce((sum, p) => sum + Number(p.amount), 0)
+   291→      : 0;
+   292→  const totalExpense =
+   293→    expenses.status === "success"
+   294→      ? expenses.data.reduce((sum, e) => sum + Number(e.amount), 0)
+   295→      : 0;
+   296→  const net = totalIncome - totalExpense;
+   297→
+   298→  return (
+   299→    <div className="space-y-4">
+   300→      {/* Header */}
+   301→      <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+   302→        <div className="space-y-1">
+   303→          <h3 className="text-sm font-medium text-muted-foreground">Payments & Expenses</h3>
+   304→          <p className="text-xs text-muted-foreground">
+   305→            Record cash / bank-transfer payments, track expenses, and view monthly financial summaries.
+   306→          </p>
+   307→        </div>
+   308→        <div className="flex flex-wrap items-end gap-2">
+   309→          <div className="space-y-1.5">
+   310→            <Label htmlFor="payments-from" className="text-xs text-muted-foreground">
+   311→              From
+   312→            </Label>
+   313→            <Input id="payments-from" type="date" value={fromDate} onChange={(e) => setFromDate(e.target.value)} className="w-36" />
+   314→          </div>
+   315→          <div className="space-y-1.5">
+   316→            <Label htmlFor="payments-to" className="text-xs text-muted-foreground">
+   317→              To
+   318→            </Label>
+   319→            <Input id="payments-to" type="date" value={toDate} onChange={(e) => setToDate(e.target.value)} className="w-36" />
+   320→          </div>
+   321→          <Button variant="outline" size="sm" onClick={() => void fetchAll()} className="gap-2">
+   322→            <RefreshCw className="h-4 w-4" aria-hidden /> Refresh
+   323→          </Button>
+   324→          <Button variant="outline" size="sm" onClick={() => setShowRecordExpense(true)} className="gap-2">
+   325→            <ArrowDownCircle className="h-4 w-4" aria-hidden /> Expense
+   326→          </Button>
+   327→          <Button size="sm" onClick={() => setShowRecordPayment(true)} className="gap-2">
+   328→            <Plus className="h-4 w-4" aria-hidden /> Record Payment
+   329→          </Button>
+   330→        </div>
+   331→      </div>
+   332→
+   333→      {/* Financial summary cards */}
+   334→      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+   335→        <SummaryCard
+   336→          label="Income (range)"
+   337→          value={formatRupiah(String(totalIncome))}
+   338→          icon={TrendingUp}
+   339→          color="emerald"
+   340→          subtitle={`${payments.status === "success" ? payments.data.length : 0} payment(s)`}
+   341→        />
+   342→        <SummaryCard
+   343→          label="Expenses (range)"
+   344→          value={formatRupiah(String(totalExpense))}
+   345→          icon={TrendingDown}
+   346→          color="rose"
+   347→          subtitle={`${expenses.status === "success" ? expenses.data.length : 0} expense(s)`}
+   348→        />
+   349→        <SummaryCard
+   350→          label="Net (range)"
+   351→          value={formatRupiah(String(net))}
+   352→          icon={Wallet}
+   353→          color={net >= 0 ? "emerald" : "rose"}
+   354→          subtitle={net >= 0 ? "Surplus" : "Deficit"}
+   355→        />
+   356→        {summary && (
+   357→          <SummaryCard
+   358→            label="This month income"
+   359→            value={formatRupiah(summary.finances.monthPaymentTotal)}
+   360→            icon={Calendar}
+   361→            color="primary"
+   362→            subtitle={`${formatDateShort(summary.monthStart)} → ${formatDateShort(summary.monthEnd)}`}
+   363→          />
+   364→        )}
+   365→      </div>
+   366→
+   367→      {/* Payments section */}
+   368→      <div className="space-y-2">
+   369→        <h4 className="flex items-center gap-2 text-sm font-medium">
+   370→          <ArrowUpCircle className="h-4 w-4 text-emerald-600" aria-hidden />
+   371→          Payments
+   372→          {payments.status === "success" && (
+   373→            <Badge variant="outline" className="text-xs font-normal">
+   374→              {payments.data.length}
+   375→            </Badge>
+   376→          )}
+   377→        </h4>
+   378→
+   379→        {payments.status === "loading" && (
+   380→          <Card>
+   381→            <CardContent className="flex items-center gap-3 p-6">
+   382→              <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" aria-hidden />
+   383→              <p className="text-sm text-muted-foreground">Loading payments…</p>
+   384→            </CardContent>
+   385→          </Card>
+   386→        )}
+   387→        {payments.status === "error" && (
+   388→          <Card className="border-destructive/30">
+   389→            <CardContent className="p-6">
+   390→              <div className="flex items-start gap-3">
+   391→                <AlertCircle className="h-5 w-5 text-destructive flex-shrink-0 mt-0.5" aria-hidden />
+   392→                <div>
+   393→                  <p className="text-sm font-medium text-destructive">Failed to load payments</p>
+   394→                  <p className="mt-1 text-sm text-muted-foreground">{payments.message}</p>
+   395→                </div>
+   396→              </div>
+   397→            </CardContent>
+   398→          </Card>
+   399→        )}
+   400→        {payments.status === "success" && payments.data.length === 0 && (
+   401→          <Card>
+   402→            <CardContent className="p-8 text-center">
+   403→              <Wallet className="mx-auto h-10 w-10 text-muted-foreground" aria-hidden />
+   404→              <p className="mt-3 text-sm font-medium">No payments in this period</p>
+   405→              <p className="mt-1 text-xs text-muted-foreground">
+   406→                Click &ldquo;Record Payment&rdquo; to log a new cash or bank-transfer payment.
+   407→              </p>
+   408→            </CardContent>
+   409→          </Card>
+   410→        )}
+   411→        {payments.status === "success" && payments.data.length > 0 && (
+   412→          <div className="space-y-2">
+   413→            {payments.data.map((p) => (
+   414→              <PaymentCard key={p.id} payment={p} academyId={academyId} />
+   415→            ))}
+   416→          </div>
+   417→        )}
+   418→      </div>
+   419→
+   420→      {/* Expenses section */}
+   421→      <div className="space-y-2">
+   422→        <h4 className="flex items-center gap-2 text-sm font-medium">
+   423→          <ArrowDownCircle className="h-4 w-4 text-rose-600" aria-hidden />
+   424→          Expenses
+   425→          {expenses.status === "success" && (
+   426→            <Badge variant="outline" className="text-xs font-normal">
+   427→              {expenses.data.length}
+   428→            </Badge>
+   429→          )}
+   430→        </h4>
+   431→
+   432→        {expenses.status === "loading" && (
+   433→          <Card>
+   434→            <CardContent className="flex items-center gap-3 p-6">
+   435→              <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" aria-hidden />
+   436→              <p className="text-sm text-muted-foreground">Loading expenses…</p>
+   437→            </CardContent>
+   438→          </Card>
+   439→        )}
+   440→        {expenses.status === "error" && (
+   441→          <Card className="border-destructive/30">
+   442→            <CardContent className="p-6">
+   443→              <div className="flex items-start gap-3">
+   444→                <AlertCircle className="h-5 w-5 text-destructive flex-shrink-0 mt-0.5" aria-hidden />
+   445→                <p className="text-sm text-muted-foreground">{expenses.message}</p>
+   446→              </div>
+   447→            </CardContent>
+   448→          </Card>
+   449→        )}
+   450→        {expenses.status === "success" && expenses.data.length === 0 && (
+   451→          <Card>
+   452→            <CardContent className="p-8 text-center">
+   453→              <Receipt className="mx-auto h-10 w-10 text-muted-foreground" aria-hidden />
+   454→              <p className="mt-3 text-sm font-medium">No expenses in this period</p>
+   455→              <p className="mt-1 text-xs text-muted-foreground">
+   456→                Click &ldquo;Expense&rdquo; to record a refund, equipment purchase, or other cost.
+   457→              </p>
+   458→            </CardContent>
+   459→          </Card>
+   460→        )}
+   461→        {expenses.status === "success" && expenses.data.length > 0 && (
+   462→          <div className="space-y-2">
+   463→            {expenses.data.map((e) => (
+   464→              <ExpenseCard key={e.id} expense={e} academyId={academyId} />
+   465→            ))}
+   466→          </div>
+   467→        )}
+   468→      </div>
+   469→
+   470→      {/* Dialogs */}
+   471→      {showRecordPayment && (
+   472→        <RecordPaymentDialog
+   473→          open={showRecordPayment}
+   474→          onClose={() => setShowRecordPayment(false)}
+   475→          academyId={academyId}
+   476→          onRecorded={() => {
+   477→            setShowRecordPayment(false);
+   478→            void fetchAll();
+   479→          }}
+   480→        />
+   481→      )}
+   482→      {showRecordExpense && (
+   483→        <RecordExpenseDialog
+   484→          open={showRecordExpense}
+   485→          onClose={() => setShowRecordExpense(false)}
+   486→          academyId={academyId}
+   487→          onRecorded={() => {
+   488→            setShowRecordExpense(false);
+   489→            void fetchAll();
+   490→          }}
+   491→        />
+   492→      )}
+   493→    </div>
+   494→  );
+   495→}
+   496→
+   497→// ============================================================================
+   498→// Summary Card
+   499→// ============================================================================
+   500→
+   501→function SummaryCard({
+   502→  label,
+   503→  value,
+   504→  icon: Icon,
+   505→  color,
+   506→  subtitle,
+   507→}: {
+   508→  label: string;
+   509→  value: string;
+   510→  icon: React.ComponentType<{ className?: string }>;
+   511→  color: "emerald" | "rose" | "primary" | "amber";
+   512→  subtitle: string;
+   513→}) {
+   514→  const colors: Record<typeof color, string> = {
+   515→    emerald: "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-400",
+   516→    rose: "bg-rose-50 text-rose-700 dark:bg-rose-950/50 dark:text-rose-400",
+   517→    primary: "bg-primary/10 text-primary",
+   518→    amber: "bg-amber-50 text-amber-700 dark:bg-amber-950/50 dark:text-amber-400",
+   519→  };
+   520→  return (
+   521→    <Card>
+   522→      <CardContent className="p-4">
+   523→        <div className="flex items-center justify-between">
+   524→          <p className="text-xs uppercase tracking-wide text-muted-foreground">{label}</p>
+   525→          <div className={`flex h-7 w-7 items-center justify-center rounded-md ${colors[color]}`}>
+   526→            <Icon className="h-4 w-4" aria-hidden />
+   527→          </div>
+   528→        </div>
+   529→        <p className="mt-2 text-xl font-semibold">{value}</p>
+   530→        <p className="mt-0.5 text-xs text-muted-foreground">{subtitle}</p>
+   531→      </CardContent>
+   532→    </Card>
+   533→  );
+   534→}
+   535→
+   536→// ============================================================================
+   537→// Payment Card
+   538→// ============================================================================
+   539→
+   540→function PaymentCard({ payment, academyId }: { payment: AcademyPayment; academyId: string }) {
+   541→  const [showMessage, setShowMessage] = useState(false);
+   542→  const [message, setMessage] = useState<string | null>(null);
+   543→  const [copied, setCopied] = useState(false);
+   544→
+   545→  const handleShowMessage = async () => {
+   546→    if (message) {
+   547→      setShowMessage(true);
+   548→      return;
+   549→    }
+   550→    try {
+   551→      const res = await fetch(`/api/admin/payments/${payment.id}/message?academyId=${academyId}`, {
+   552→        credentials: "same-origin",
+   553→      });
+   554→      const data = (await res.json()) as { message?: string; error?: { message?: string } };
+   555→      if (res.ok && data.message) {
+   556→        setMessage(data.message);
+   557→        setShowMessage(true);
+   558→      }
+   559→    } catch {
+   560→      // ignore
+   561→    }
+   562→  };
+   563→
+   564→  const handleCopy = async () => {
+   565→    if (!message) return;
+   566→    try {
+   567→      await navigator.clipboard.writeText(message);
+   568→      setCopied(true);
+   569→      setTimeout(() => setCopied(false), 1500);
+   570→    } catch {
+   571→      // ignore
+   572→    }
+   573→  };
+   574→
+   575→  return (
+   576→    <Card className="transition-all hover:border-primary/40">
+   577→      <CardContent className="p-4">
+   578→        <div className="flex items-start justify-between gap-3">
+   579→          <div className="flex items-start gap-3">
+   580→            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-emerald-50 text-emerald-600 dark:bg-emerald-950/50 dark:text-emerald-400">
+   581→              <ArrowUpCircle className="h-5 w-5" aria-hidden />
+   582→            </div>
+   583→            <div className="min-w-0">
+   584→              <div className="flex flex-wrap items-center gap-2">
+   585→                <p className="font-medium leading-tight">{payment.studentName}</p>
+   586→                <Badge variant="secondary" className="text-xs">
+   587→                  {payment.paymentMethod === "cash" ? "Cash" : "Bank Transfer"}
+   588→                </Badge>
+   589→                <Badge
+   590→                  variant="outline"
+   591→                  className={
+   592→                    payment.status === "confirmed"
+   593→                      ? "border-emerald-200 text-emerald-700 dark:border-emerald-900 dark:text-emerald-400"
+   594→                      : payment.status === "submitted"
+   595→                        ? "border-amber-200 text-amber-700 dark:border-amber-900 dark:text-amber-400"
+   596→                        : "border-muted-foreground/30 text-muted-foreground"
+   597→                  }
+   598→                >
+   599→                  {payment.status}
+   600→                </Badge>
+   601→              </div>
+   602→              <p className="mt-0.5 text-sm text-muted-foreground">
+   603→                {payment.packageName ?? "—"}
+   604→                {payment.sessionCount ? ` · ${payment.sessionCount} sessions` : ""}
+   605→                {payment.payerName ? ` · paid by ${payment.payerName}` : ""}
+   606→              </p>
+   607→              <p className="mt-0.5 text-xs text-muted-foreground">
+   608→                {formatDateShort(payment.paymentDate)}
+   609→                {payment.referenceNumber ? ` · Ref: ${payment.referenceNumber}` : ""}
+   610→              </p>
+   611→            </div>
+   612→          </div>
+   613→          <div className="flex flex-col items-end gap-1.5">
+   614→            <p className="text-lg font-semibold tabular-nums">{formatRupiah(payment.amount)}</p>
+   615→            <Button variant="ghost" size="sm" onClick={handleShowMessage} className="h-7 gap-1.5 text-xs">
+   616→              <MessageCircle className="h-3.5 w-3.5" aria-hidden /> Confirmation
+   617→            </Button>
+   618→          </div>
+   619→        </div>
+   620→        {showMessage && message && (
+   621→          <div className="mt-3 rounded-lg border bg-muted/30 p-3">
+   622→            <div className="flex items-center justify-between">
+   623→              <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+   624→                WhatsApp confirmation message
+   625→              </p>
+   626→              <Button variant="ghost" size="sm" onClick={handleCopy} className="h-7 gap-1.5 text-xs">
+   627→                {copied ? (
+   628→                  <>
+   629→                    <Check className="h-3.5 w-3.5 text-emerald-600" aria-hidden /> Copied
+   630→                  </>
+   631→                ) : (
+   632→                  <>
+   633→                    <Copy className="h-3.5 w-3.5" aria-hidden /> Copy
+   634→                  </>
+   635→                )}
+   636→              </Button>
+   637→            </div>
+   638→            <pre className="mt-2 whitespace-pre-wrap text-xs leading-relaxed">{message}</pre>
+   639→          </div>
+   640→        )}
+   641→      </CardContent>
+   642→    </Card>
+   643→  );
+   644→}
+   645→
+   646→// ============================================================================
+   647→// Expense Card
+   648→// ============================================================================
+   649→
+   650→function ExpenseCard({ expense, academyId: _academyId }: { expense: ExpenseRow; academyId: string }) {
+   651→  const isRefund = expense.category.toLowerCase() === "refund";
+   652→  return (
+   653→    <Card className="transition-all hover:border-primary/40">
+   654→      <CardContent className="p-4">
+   655→        <div className="flex items-start justify-between gap-3">
+   656→          <div className="flex items-start gap-3">
+   657→            <div
+   658→              className={`flex h-10 w-10 items-center justify-center rounded-lg ${
+   659→                isRefund
+   660→                  ? "bg-amber-50 text-amber-600 dark:bg-amber-950/50 dark:text-amber-400"
+   661→                  : "bg-rose-50 text-rose-600 dark:bg-rose-950/50 dark:text-rose-400"
+   662→              }`}
+   663→            >
+   664→              <ArrowDownCircle className="h-5 w-5" aria-hidden />
+   665→            </div>
+   666→            <div className="min-w-0">
+   667→              <div className="flex flex-wrap items-center gap-2">
+   668→                <p className="font-medium leading-tight">{expense.category}</p>
+   669→                {isRefund && (
+   670→                  <Badge variant="outline" className="border-amber-200 text-amber-700 dark:border-amber-900 dark:text-amber-400">
+   671→                    Refund
+   672→                  </Badge>
+   673→                )}
+   674→              </div>
+   675→              {expense.note && <p className="mt-0.5 text-sm text-muted-foreground">{expense.note}</p>}
+   676→              <p className="mt-0.5 text-xs text-muted-foreground">{formatDateShort(expense.incurredOn)}</p>
+   677→            </div>
+   678→          </div>
+   679→          <p className="text-lg font-semibold tabular-nums">{formatRupiah(expense.amount)}</p>
+   680→        </div>
+   681→      </CardContent>
+   682→    </Card>
+   683→  );
+   684→}
+   685→
+   686→// ============================================================================
+   687→// Record Payment Dialog
+   688→// ============================================================================
+   689→
+   690→function RecordPaymentDialog({
+   691→  open,
+   692→  onClose,
+   693→  academyId,
+   694→  onRecorded,
+   695→}: {
+   696→  open: boolean;
+   697→  onClose: () => void;
+   698→  academyId: string;
+   699→  onRecorded: () => void;
+   700→}) {
+   701→  const [students, setStudents] = useState<Student[]>([]);
+   702→  const [plans, setPlans] = useState<PackagePlan[]>([]);
+   703→  const [studentId, setStudentId] = useState("");
+   704→  const [packagePlanId, setPackagePlanId] = useState("");
+   705→  const [amount, setAmount] = useState("");
+   706→  const [paymentMethod, setPaymentMethod] = useState<"cash" | "bank_transfer">("cash");
+   707→  const [paymentDate, setPaymentDate] = useState(jakartaTodayYmd());
+   708→  const [payerName, setPayerName] = useState("");
+   709→  const [referenceNumber, setReferenceNumber] = useState("");
+   710→  const [notes, setNotes] = useState("");
+   711→  const [submitting, setSubmitting] = useState(false);
+   712→  const [error, setError] = useState<string | null>(null);
+   713→  const idempotencyKeyRef = useRef<string>("");
+   714→  useEffect(() => {
+   715→    idempotencyKeyRef.current = "";
+   716→  }, [open]);
+   717→
+   718→  // Load students + plans when the dialog opens.
+   719→  useEffect(() => {
+   720→    if (!open) return;
+   721→    void (async () => {
+   722→      try {
+   723→        const [stuRes, planRes] = await Promise.all([
+   724→          fetch(`/api/admin/students?academyId=${academyId}`, { credentials: "same-origin" }),
+   725→          fetch(`/api/admin/package-plans?academyId=${academyId}`, { credentials: "same-origin" }),
+   726→        ]);
+   727→        const stuData = (await stuRes.json()) as { students?: Student[] };
+   728→        const planData = (await planRes.json()) as { plans?: PackagePlanApi[] };
+   729→        setStudents(stuData.students ?? []);
+   730→        // Only show active plans in the picker.
+   731→        setPlans((planData.plans ?? []).filter((p) => p.is_active).map(mapPlan));
+   732→      } catch {
+   733→        // ignore — the form will show an empty-list state
+   734→      }
+   735→    })();
+   736→  }, [open, academyId]);
+   737→
+   738→  // Amount is NOT auto-filled from the package plan. The package_plans
+   739→  // table has no authoritative price field (only session_count), so
+   740→  // deriving an amount from sessionCount would fabricate a misleading
+   741→  // default (the old code did `sessionCount * 50000`, implying a fixed
+   742→  // per-session price of IDR 50,000 that does not exist in the data
+   743→  // model). The admin MUST enter the actual amount paid — partial
+   744→  // payments, overpayments, and discounts are all supported by the
+   745→  // server-side recordPayment model (payments.submitted_amount is a
+   746→  // plain numeric, validated > 0).
+   747→  // See Phase B5.2 for the full rationale.
+   748→
+   749→  const handleSubmit = async () => {
+   750→    if (!studentId) {
+   751→      setError("Select a student.");
+   752→      return;
+   753→    }
+   754→    if (!packagePlanId) {
+   755→      setError("Select a package plan.");
+   756→      return;
+   757→    }
+   758→    const amt = Number(amount);
+   759→    if (!amt || amt <= 0) {
+   760→      setError("Amount must be greater than zero.");
+   761→      return;
+   762→    }
+   763→    if (!paymentDate) {
+   764→      setError("Payment date is required.");
+   765→      return;
+   766→    }
+   767→    if (!payerName.trim()) {
+   768→      setError("Payer name is required.");
+   769→      return;
+   770→    }
+   771→    setSubmitting(true);
+   772→    setError(null);
+   773→    try {
+   774→      if (!idempotencyKeyRef.current) {
+   775→        idempotencyKeyRef.current = crypto.randomUUID();
+   776→      }
+   777→      const body: Record<string, unknown> = {
+   778→        studentId,
+   779→        packagePlanId,
+   780→        amount: amt,
+   781→        paymentMethod,
+   782→        paymentDate,
+   783→        payerName: payerName.trim(),
+   784→        idempotencyKey: idempotencyKeyRef.current,
+   785→      };
+   786→      if (referenceNumber.trim()) body.referenceNumber = referenceNumber.trim();
+   787→      if (notes.trim()) body.notes = notes.trim();
+   788→      const res = await adminFetch(`/api/admin/payments?academyId=${academyId}`, "POST", body);
+   789→      if (res.ok || res.status === 201) {
+   790→        toast({ title: "Payment recorded" });
+   791→        onRecorded();
+   792→        return;
+   793→      }
+   794→      const data = (await res.json()) as { error?: { message?: string } };
+   795→      const failMsg = data.error?.message ?? `Error ${res.status}`;
+   796→      setError(failMsg);
+   797→      toast({ title: "Failed to record payment", description: failMsg, variant: "destructive" });
+   798→    } catch {
+   799→      setError("Network error");
+   800→      toast({ title: "Failed to record payment", description: "Network error", variant: "destructive" });
+   801→    } finally {
+   802→      setSubmitting(false);
+   803→    }
+   804→  };
+   805→
+   806→  const handleClose = () => {
+   807→    if (submitting) return;
+   808→    onClose();
+   809→  };
+   810→
+   811→  return (
+   812→    <Dialog open={open} onOpenChange={(v) => { if (!v) handleClose(); }}>
+   813→      <DialogContent className="sm:max-w-lg">
+   814→        <DialogHeader>
+   815→          <DialogTitle>Record Manual Payment</DialogTitle>
+   816→          <DialogDescription>
+   817→            Records a confirmed cash or bank-transfer payment and atomically purchases the package + creates entitlements.
+   818→          </DialogDescription>
+   819→        </DialogHeader>
+   820→        <div className="space-y-4">
+   821→          <div className="space-y-2">
+   822→            <Label htmlFor="pay-student">Student *</Label>
+   823→            <Select value={studentId} onValueChange={setStudentId} disabled={submitting}>
+   824→              <SelectTrigger id="pay-student">
+   825→                <SelectValue placeholder="Select student" />
+   826→              </SelectTrigger>
+   827→              <SelectContent>
+   828→                {students.map((s) => (
+   829→                  <SelectItem key={s.id} value={s.id}>
+   830→                    {s.full_name}
+   831→                  </SelectItem>
+   832→                ))}
+   833→              </SelectContent>
+   834→            </Select>
+   835→          </div>
+   836→          <div className="space-y-2">
+   837→            <Label htmlFor="pay-plan">Package Plan *</Label>
+   838→            <Select value={packagePlanId} onValueChange={setPackagePlanId} disabled={submitting}>
+   839→              <SelectTrigger id="pay-plan">
+   840→                <SelectValue placeholder="Select plan" />
+   841→              </SelectTrigger>
+   842→              <SelectContent>
+   843→                {plans.map((p) => (
+   844→                  <SelectItem key={p.id} value={p.id}>
+   845→                    {p.name} ({p.sessionCount} sessions)
+   846→                  </SelectItem>
+   847→                ))}
+   848→              </SelectContent>
+   849→            </Select>
+   850→          </div>
+   851→          <div className="grid grid-cols-2 gap-4">
+   852→            <div className="space-y-2">
+   853→              <Label htmlFor="pay-amount">Amount (IDR) *</Label>
+   854→              <Input
+   855→                id="pay-amount"
+   856→                type="number"
+   857→                min={1}
+   858→                value={amount}
+   859→                onChange={(e) => setAmount(e.target.value)}
+   860→                disabled={submitting}
+   861→                placeholder="Enter the amount paid (no auto-fill)"
+   862→              />
+   863→            </div>
+   864→            <div className="space-y-2">
+   865→              <Label htmlFor="pay-method">Method *</Label>
+   866→              <Select value={paymentMethod} onValueChange={(v) => setPaymentMethod(v as "cash" | "bank_transfer")} disabled={submitting}>
+   867→                <SelectTrigger id="pay-method">
+   868→                  <SelectValue />
+   869→                </SelectTrigger>
+   870→                <SelectContent>
+   871→                  <SelectItem value="cash">Cash</SelectItem>
+   872→                  <SelectItem value="bank_transfer">Bank Transfer</SelectItem>
+   873→                </SelectContent>
+   874→              </Select>
+   875→            </div>
+   876→          </div>
+   877→          <div className="grid grid-cols-2 gap-4">
+   878→            <div className="space-y-2">
+   879→              <Label htmlFor="pay-date">Payment Date *</Label>
+   880→              <Input id="pay-date" type="date" value={paymentDate} onChange={(e) => setPaymentDate(e.target.value)} disabled={submitting} />
+   881→            </div>
+   882→            <div className="space-y-2">
+   883→              <Label htmlFor="pay-ref">Reference #</Label>
+   884→              <Input id="pay-ref" value={referenceNumber} onChange={(e) => setReferenceNumber(e.target.value)} disabled={submitting} placeholder="Optional" />
+   885→            </div>
+   886→          </div>
+   887→          <div className="space-y-2">
+   888→            <Label htmlFor="pay-payer">Payer Name *</Label>
+   889→            <Input id="pay-payer" value={payerName} onChange={(e) => setPayerName(e.target.value)} disabled={submitting} placeholder="Parent / guardian name" />
+   890→          </div>
+   891→          <div className="space-y-2">
+   892→            <Label htmlFor="pay-notes">Notes</Label>
+   893→            <Textarea id="pay-notes" value={notes} onChange={(e) => setNotes(e.target.value)} disabled={submitting} placeholder="Optional" rows={2} />
+   894→          </div>
+   895→          {error && (
+   896→            <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 p-3">
+   897→              <AlertCircle className="h-4 w-4 text-destructive flex-shrink-0 mt-0.5" aria-hidden />
+   898→              <p className="text-sm text-destructive">{error}</p>
+   899→            </div>
+   900→          )}
+   901→        </div>
+   902→        <DialogFooter className="gap-2">
+   903→          <Button variant="outline" onClick={handleClose} disabled={submitting}>
+   904→            Cancel
+   905→          </Button>
+   906→          <Button onClick={handleSubmit} disabled={submitting}>
+   907→            {submitting ? (
+   908→              <>
+   909→                <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> Recording…
+   910→              </>
+   911→            ) : (
+   912→              "Record Payment"
+   913→            )}
+   914→          </Button>
+   915→        </DialogFooter>
+   916→      </DialogContent>
+   917→    </Dialog>
+   918→  );
+   919→}
+   920→
+   921→// ============================================================================
+   922→// Record Expense Dialog
+   923→// ============================================================================
+   924→
+   925→function RecordExpenseDialog({
+   926→  open,
+   927→  onClose,
+   928→  academyId,
+   929→  onRecorded,
+   930→}: {
+   931→  open: boolean;
+   932→  onClose: () => void;
+   933→  academyId: string;
+   934→  onRecorded: () => void;
+   935→}) {
+   936→  const [amount, setAmount] = useState("");
+   937→  const [category, setCategory] = useState("");
+   938→  const [incurredOn, setIncurredOn] = useState(jakartaTodayYmd());
+   939→  const [note, setNote] = useState("");
+   940→  const [submitting, setSubmitting] = useState(false);
+   941→  const [error, setError] = useState<string | null>(null);
+   942→
+   943→  useEffect(() => {
+   944→    if (open) {
+   945→      setAmount("");
+   946→      setCategory("");
+   947→      setIncurredOn(jakartaTodayYmd());
+   948→      setNote("");
+   949→      setSubmitting(false);
+   950→      setError(null);
+   951→    }
+   952→  }, [open]);
+   953→
+   954→  const handleSubmit = async () => {
+   955→    const amt = Number(amount);
+   956→    if (!Number.isFinite(amt) || amt < 0) {
+   957→      setError("Amount must be a non-negative number.");
+   958→      return;
+   959→    }
+   960→    if (!category.trim()) {
+   961→      setError("Category is required (e.g. 'Equipment', 'Rent', 'Refund').");
+   962→      return;
+   963→    }
+   964→    if (!incurredOn) {
+   965→      setError("Incurred-on date is required.");
+   966→      return;
+   967→    }
+   968→    setSubmitting(true);
+   969→    setError(null);
+   970→    try {
+   971→      const body: Record<string, unknown> = {
+   972→        amount: amt,
+   973→        category: category.trim(),
+   974→        incurredOn,
+   975→      };
+   976→      if (note.trim()) body.note = note.trim();
+   977→      const res = await adminFetch(`/api/admin/expenses?academyId=${academyId}`, "POST", body);
+   978→      if (res.status === 201) {
+   979→        toast({ title: "Expense recorded" });
+   980→        onRecorded();
+   981→        return;
+   982→      }
+   983→      const data = (await res.json()) as { error?: { message?: string } };
+   984→      const failMsg = data.error?.message ?? `Error ${res.status}`;
+   985→      setError(failMsg);
+   986→      toast({ title: "Failed to record expense", description: failMsg, variant: "destructive" });
+   987→    } catch {
+   988→      setError("Network error");
+   989→      toast({ title: "Failed to record expense", description: "Network error", variant: "destructive" });
+   990→    } finally {
+   991→      setSubmitting(false);
+   992→    }
+   993→  };
+   994→
+   995→  const handleClose = () => {
+   996→    if (submitting) return;
+   997→    onClose();
+   998→  };
+   999→
+  1000→  return (
+  1001→    <Dialog open={open} onOpenChange={(v) => { if (!v) handleClose(); }}>
+  1002→      <DialogContent className="sm:max-w-md">
+  1003→        <DialogHeader>
+  1004→          <DialogTitle>Record Expense</DialogTitle>
+  1005→          <DialogDescription>
+  1006→            Record a cash outflow — equipment, rent, refund, etc. Amount, category, and date are immutable after creation.
+  1007→          </DialogDescription>
+  1008→        </DialogHeader>
+  1009→        <div className="space-y-4">
+  1010→          <div className="space-y-2">
+  1011→            <Label htmlFor="exp-amount">Amount (IDR) *</Label>
+  1012→            <Input id="exp-amount" type="number" min={0} value={amount} onChange={(e) => setAmount(e.target.value)} disabled={submitting} placeholder="0" />
+  1013→          </div>
+  1014→          <div className="space-y-2">
+  1015→            <Label htmlFor="exp-category">Category *</Label>
+  1016→            <Input id="exp-category" value={category} onChange={(e) => setCategory(e.target.value)} disabled={submitting} placeholder="e.g. Equipment, Rent, Refund, Transport" />
+  1017→            <p className="text-xs text-muted-foreground">Free-text. Use &ldquo;Refund&rdquo; for refund expenses.</p>
+  1018→          </div>
+  1019→          <div className="space-y-2">
+  1020→            <Label htmlFor="exp-date">Incurred On *</Label>
+  1021→            <Input id="exp-date" type="date" value={incurredOn} onChange={(e) => setIncurredOn(e.target.value)} disabled={submitting} />
+  1022→          </div>
+  1023→          <div className="space-y-2">
+  1024→            <Label htmlFor="exp-note">Note</Label>
+  1025→            <Textarea id="exp-note" value={note} onChange={(e) => setNote(e.target.value)} disabled={submitting} placeholder="Optional description" rows={2} />
+  1026→          </div>
+  1027→          {error && (
+  1028→            <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 p-3">
+  1029→              <AlertCircle className="h-4 w-4 text-destructive flex-shrink-0 mt-0.5" aria-hidden />
+  1030→              <p className="text-sm text-destructive">{error}</p>
+  1031→            </div>
+  1032→          )}
+  1033→        </div>
+  1034→        <DialogFooter className="gap-2">
+  1035→          <Button variant="outline" onClick={handleClose} disabled={submitting}>
+  1036→            Cancel
+  1037→          </Button>
+  1038→          <Button onClick={handleSubmit} disabled={submitting}>
+  1039→            {submitting ? (
+  1040→              <>
+  1041→                <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> Recording…
+  1042→              </>
+  1043→            ) : (
+  1044→              "Record Expense"
+  1045→            )}
+  1046→          </Button>
+  1047→        </DialogFooter>
+  1048→      </DialogContent>
+  1049→    </Dialog>
+  1050→  );
+  1051→}
+  1052→
+  1053→// Silence unused-import warnings for icons that may be tree-shaken in dev.
+  1054→void RefreshCw;
+  1055→void Calendar;
+  1056→void MessageCircle;
+  1057→

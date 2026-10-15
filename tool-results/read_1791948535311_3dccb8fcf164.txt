@@ -1,0 +1,758 @@
+     1→"use client";
+     2→
+     3→import { useState, useRef, useEffect, useCallback, useMemo } from "react";
+     4→import {
+     5→  FileCheck,
+     6→  AlertCircle,
+     7→  Loader2,
+     8→  RefreshCw,
+     9→  Check,
+    10→  X,
+    11→  User,
+    12→  Phone,
+    13→  Mail,
+    14→  Calendar,
+    15→  MessageSquare,
+    16→  Clock,
+    17→  CheckCircle2,
+    18→  XCircle,
+    19→  Users,
+    20→  Search,
+    21→} from "lucide-react";
+    22→import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+    23→import { Button } from "@/components/ui/button";
+    24→import { Badge } from "@/components/ui/badge";
+    25→import { Label } from "@/components/ui/label";
+    26→import { Input } from "@/components/ui/input";
+    27→import { Textarea } from "@/components/ui/textarea";
+    28→import {
+    29→  Dialog,
+    30→  DialogContent,
+    31→  DialogDescription,
+    32→  DialogFooter,
+    33→  DialogHeader,
+    34→  DialogTitle,
+    35→} from "@/components/ui/dialog";
+    36→import { CSRF_HEADER } from "@/lib/auth/csrf";
+    37→
+    38→// ============================================================================
+    39→// Types — match RegistrationApplicationRow (camelCase from API SQL aliases)
+    40→// ============================================================================
+    41→
+    42→type AppStatus = "pending" | "approved" | "rejected";
+    43→type StatusFilter = AppStatus | "all";
+    44→
+    45→interface RegistrationApplication {
+    46→  id: string;
+    47→  academyId: string;
+    48→  parentFullName: string;
+    49→  parentPhone: string;
+    50→  parentEmail: string | null;
+    51→  preferredContact: string | null;
+    52→  childFullName: string;
+    53→  childDateOfBirth: string | null;
+    54→  classPreference: string | null;
+    55→  preferredDay: string | null;
+    56→  notes: string | null;
+    57→  source: string;
+    58→  status: AppStatus;
+    59→  reviewedBy: string | null;
+    60→  reviewedAt: string | null;
+    61→  rejectionReason: string | null;
+    62→  studentId: string | null;
+    63→  submittedAt: string;
+    64→}
+    65→
+    66→type ListState =
+    67→  | { status: "loading" }
+    68→  | { status: "error"; message: string }
+    69→  | { status: "success"; data: RegistrationApplication[] };
+    70→
+    71→// ============================================================================
+    72→// Helpers
+    73→// ============================================================================
+    74→
+    75→/** Format an ISO timestamp "YYYY-MM-DDTHH:MM:SSZ" → "DD Mon YYYY, HH:MM". */
+    76→function formatTimestamp(iso: string | null): string {
+    77→  if (!iso) return "—";
+    78→  const d = new Date(iso);
+    79→  if (Number.isNaN(d.getTime())) return iso;
+    80→  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    81→  return `${String(d.getUTCDate()).padStart(2, "0")} ${months[d.getUTCMonth()]} ${d.getUTCFullYear()}, ${String(d.getUTCHours()).padStart(2, "0")}:${String(d.getUTCMinutes()).padStart(2, "0")}`;
+    82→}
+    83→
+    84→/** Format a date value (either "YYYY-MM-DD" or ISO timestamp) → "DD Mon YYYY". */
+    85→function formatDate(dateVal: string | null): string {
+    86→  if (!dateVal) return "—";
+    87→  // Handle both "YYYY-MM-DD" (clean string) and ISO timestamps
+    88→  // "YYYY-MM-DDT00:00:00.000Z" (Date.toJSON from the DB driver).
+    89→  const ymdMatch = /^(\d{4})-(\d{2})-(\d{2})/.exec(dateVal);
+    90→  if (!ymdMatch || !ymdMatch[1] || !ymdMatch[2] || !ymdMatch[3]) return dateVal;
+    91→  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    92→  const day = parseInt(ymdMatch[3], 10);
+    93→  const month = parseInt(ymdMatch[2], 10) - 1;
+    94→  const year = parseInt(ymdMatch[1], 10);
+    95→  return `${String(day).padStart(2, "0")} ${months[month] ?? "???"} ${year}`;
+    96→}
+    97→
+    98→/** Calculate age from DOB (either "YYYY-MM-DD" or ISO timestamp) in years. */
+    99→function ageFromDob(dateVal: string | null): string {
+   100→  if (!dateVal) return "—";
+   101→  const ymdMatch = /^(\d{4})-(\d{2})-(\d{2})/.exec(dateVal);
+   102→  if (!ymdMatch) return "—";
+   103→  const dob = new Date(`${ymdMatch[0]}T00:00:00.000Z`);
+   104→  if (Number.isNaN(dob.getTime())) return "—";
+   105→  const now = new Date();
+   106→  let age = now.getUTCFullYear() - dob.getUTCFullYear();
+   107→  const m = now.getUTCMonth() - dob.getUTCMonth();
+   108→  if (m < 0 || (m === 0 && now.getUTCDate() < dob.getUTCDate())) age--;
+   109→  return `${age} yrs`;
+   110→}
+   111→
+   112→const CONTACT_META: Record<string, { label: string; icon: React.ComponentType<{ className?: string }>; color: string }> = {
+   113→  phone: { label: "Phone", icon: Phone, color: "text-sky-600" },
+   114→  email: { label: "Email", icon: Mail, color: "text-violet-600" },
+   115→  whatsapp: { label: "WhatsApp", icon: MessageSquare, color: "text-emerald-600" },
+   116→};
+   117→
+   118→async function adminFetch(url: string, method: string, body?: unknown): Promise<Response> {
+   119→  const csrfMatch = document.cookie.split("; ").find((c) => c.startsWith("futsal_csrf="));
+   120→  const csrfToken = csrfMatch?.split("=")[1] ?? "";
+   121→  return fetch(url, {
+   122→    method,
+   123→    credentials: "same-origin",
+   124→    headers: {
+   125→      "Content-Type": "application/json",
+   126→      [CSRF_HEADER]: csrfToken,
+   127→    },
+   128→    body: body !== undefined ? JSON.stringify(body) : undefined,
+   129→  });
+   130→}
+   131→
+   132→// ============================================================================
+   133→// Main component
+   134→// ============================================================================
+   135→
+   136→export function RegistrationsManagement({ academyId }: { academyId: string }) {
+   137→  const [statusFilter, setStatusFilter] = useState<StatusFilter>("pending");
+   138→  const [state, setState] = useState<ListState>({ status: "loading" });
+   139→  const [search, setSearch] = useState("");
+   140→  const [rejectingApp, setRejectingApp] = useState<RegistrationApplication | null>(null);
+   141→  const academyIdRef = useRef(academyId);
+   142→  useEffect(() => {
+   143→    academyIdRef.current = academyId;
+   144→  }, [academyId]);
+   145→
+   146→  /**
+   147→   * Fetch the application list from the server.
+   148→   *
+   149→   * @param silent — when true, does NOT set loading/error state. Used after
+   150→   *   optimistic mutations (approve/reject) to reconcile local state with
+   151→   *   the server without causing a loading flash or replacing the list with
+   152→   *   an error message on failure. On silent failure, the current list
+   153→   *   (which reflects the successful mutation) stays visible.
+   154→   */
+   155→  const fetchList = useCallback(async (silent = false) => {
+   156→    const aid = academyId;
+   157→    const filter = statusFilter;
+   158→    if (!aid) {
+   159→      if (!silent) setState({ status: "error", message: "No academy selected" });
+   160→      return;
+   161→    }
+   162→    if (!silent) setState({ status: "loading" });
+   163→    try {
+   164→      const res = await fetch(
+   165→        `/api/admin/registrations?academyId=${aid}&status=${filter}`,
+   166→        { credentials: "same-origin" },
+   167→      );
+   168→      const data = (await res.json()) as { applications?: RegistrationApplication[]; error?: { message?: string } };
+   169→      if (aid !== academyIdRef.current) return;
+   170→      if (!res.ok || !data.applications) {
+   171→        // Silent failure: keep the current list (the mutation already
+   172→        // succeeded, so the optimistic state is correct).
+   173→        if (!silent) {
+   174→          setState({ status: "error", message: data.error?.message ?? `Error ${res.status}` });
+   175→        }
+   176→        return;
+   177→      }
+   178→      setState({ status: "success", data: data.applications });
+   179→    } catch {
+   180→      if (aid !== academyIdRef.current) return;
+   181→      // Silent failure: keep the current list.
+   182→      if (!silent) {
+   183→        setState({ status: "error", message: "Network error" });
+   184→      }
+   185→    }
+   186→  }, [academyId, statusFilter]);
+   187→
+   188→  useEffect(() => {
+   189→    if (!academyId) return;
+   190→    let cancelled = false;
+   191→    void (async () => {
+   192→      try {
+   193→        const res = await fetch(
+   194→          `/api/admin/registrations?academyId=${academyId}&status=${statusFilter}`,
+   195→          { credentials: "same-origin" },
+   196→        );
+   197→        if (cancelled) return;
+   198→        const data = (await res.json()) as { applications?: RegistrationApplication[]; error?: { message?: string } };
+   199→        if (cancelled) return;
+   200→        if (!res.ok || !data.applications) {
+   201→          setState({ status: "error", message: data.error?.message ?? `Error ${res.status}` });
+   202→          return;
+   203→        }
+   204→        setState({ status: "success", data: data.applications });
+   205→      } catch {
+   206→        if (cancelled) return;
+   207→        setState({ status: "error", message: "Network error" });
+   208→      }
+   209→    })();
+   210→    return () => {
+   211→      cancelled = true;
+   212→    };
+   213→  }, [academyId, statusFilter]);
+   214→
+   215→  // Optimistic update: remove an application from the local list immediately
+   216→  // after approve/reject, before the server confirms via fetchList. This
+   217→  // fixes R4 (stale data after approve — the card would stay visible until
+   218→  // the refetch completed, which could take 200-500ms with PgLite).
+   219→  const optimisticRemove = useCallback((appId: string) => {
+   220→    setState((prev) => {
+   221→      if (prev.status !== "success") return prev;
+   222→      return {
+   223→        status: "success",
+   224→        data: prev.data.filter((a) => a.id !== appId),
+   225→      };
+   226→    });
+   227→  }, []);
+   228→
+   229→  // Derive counts from the current list for the filter tab badges.
+   230→  const counts = useMemo(() => {
+   231→    const c = { pending: 0, approved: 0, rejected: 0 };
+   232→    if (state.status === "success") {
+   233→      for (const app of state.data) {
+   234→        if (app.status === "pending") c.pending++;
+   235→        else if (app.status === "approved") c.approved++;
+   236→        else if (app.status === "rejected") c.rejected++;
+   237→      }
+   238→    }
+   239→    return c;
+   240→  }, [state]);
+   241→
+   242→  // Client-side search filter (R3). Filters by parent name, child name,
+   243→  // or phone number.
+   244→  const filteredApps = useMemo(() => {
+   245→    if (state.status !== "success") return [];
+   246→    if (!search.trim()) return state.data;
+   247→    const q = search.toLowerCase().trim();
+   248→    return state.data.filter((a) =>
+   249→      a.parentFullName.toLowerCase().includes(q) ||
+   250→      a.childFullName.toLowerCase().includes(q) ||
+   251→      a.parentPhone.toLowerCase().includes(q) ||
+   252→      (a.parentEmail?.toLowerCase().includes(q) ?? false),
+   253→    );
+   254→  }, [state, search]);
+   255→
+   256→  const filterTabs: { id: StatusFilter; label: string; count?: number; color: string }[] = [
+   257→    { id: "pending", label: "Pending", count: counts.pending, color: "amber" },
+   258→    { id: "approved", label: "Approved", count: counts.approved, color: "emerald" },
+   259→    { id: "rejected", label: "Rejected", count: counts.rejected, color: "rose" },
+   260→    { id: "all", label: "All", color: "muted" },
+   261→  ];
+   262→
+   263→  return (
+   264→    <div className="space-y-4">
+   265→      {/* Header */}
+   266→      <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+   267→        <div className="space-y-1">
+   268→          <h3 className="text-sm font-medium text-muted-foreground">Registrations</h3>
+   269→          <p className="text-xs text-muted-foreground">
+   270→            Review public registration applications. Approving creates a student + guardian account + class enrollment.
+   271→          </p>
+   272→        </div>
+   273→        <Button variant="outline" size="sm" onClick={() => void fetchList()} className="gap-2">
+   274→          <RefreshCw className="h-4 w-4" aria-hidden /> Refresh
+   275→        </Button>
+   276→      </div>
+   277→
+   278→      {/* Status filter tabs */}
+   279→      <div className="flex gap-1 overflow-x-auto rounded-lg bg-muted p-1" role="tablist" aria-label="Registration status filter">
+   280→        {filterTabs.map((tab) => (
+   281→          <button
+   282→            key={tab.id}
+   283→            type="button"
+   284→            role="tab"
+   285→            aria-selected={statusFilter === tab.id}
+   286→            onClick={() => { setStatusFilter(tab.id); setSearch(""); }}
+   287→            className={`flex items-center gap-2 rounded-md px-3 py-1.5 text-sm font-medium transition-colors whitespace-nowrap ${
+   288→              statusFilter === tab.id
+   289→                ? "bg-background text-foreground shadow-sm"
+   290→                : "text-muted-foreground hover:text-foreground"
+   291→            }`}
+   292→          >
+   293→            {tab.label}
+   294→            {tab.count !== undefined && tab.count > 0 && (
+   295→              <Badge
+   296→                variant="secondary"
+   297→                className={`h-5 min-w-5 px-1.5 text-xs ${
+   298→                  tab.color === "amber"
+   299→                    ? "bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-400"
+   300→                    : tab.color === "emerald"
+   301→                      ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-400"
+   302→                      : tab.color === "rose"
+   303→                        ? "bg-rose-100 text-rose-700 dark:bg-rose-950 dark:text-rose-400"
+   304→                        : ""
+   305→                }`}
+   306→              >
+   307→                {tab.count}
+   308→              </Badge>
+   309→            )}
+   310→          </button>
+   311→        ))}
+   312→      </div>
+   313→
+   314→      {/* Search bar (R3) */}
+   315→      {state.status === "success" && state.data.length > 0 && (
+   316→        <div className="flex items-center gap-2">
+   317→          <div className="relative max-w-xs flex-1">
+   318→            <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" aria-hidden />
+   319→            <Input
+   320→              placeholder="Search by parent, child, or phone…"
+   321→              value={search}
+   322→              onChange={(e) => setSearch(e.target.value)}
+   323→              className="pl-9"
+   324→            />
+   325→          </div>
+   326→          {search && (
+   327→            <Button variant="ghost" size="sm" onClick={() => setSearch("")} className="text-xs">
+   328→              Clear
+   329→            </Button>
+   330→          )}
+   331→        </div>
+   332→      )}
+   333→
+   334→      {/* Loading */}
+   335→      {state.status === "loading" && (
+   336→        <Card>
+   337→          <CardContent className="flex items-center gap-3 p-6">
+   338→            <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" aria-hidden />
+   339→            <p className="text-sm text-muted-foreground">Loading applications…</p>
+   340→          </CardContent>
+   341→        </Card>
+   342→      )}
+   343→
+   344→      {/* Error */}
+   345→      {state.status === "error" && (
+   346→        <Card className="border-destructive/30">
+   347→          <CardContent className="p-6">
+   348→            <div className="flex items-start gap-3">
+   349→              <AlertCircle className="h-5 w-5 text-destructive flex-shrink-0 mt-0.5" aria-hidden />
+   350→              <div>
+   351→                <p className="text-sm font-medium text-destructive">Failed to load applications</p>
+   352→                <p className="mt-1 text-sm text-muted-foreground">{state.message}</p>
+   353→                <Button variant="outline" size="sm" className="mt-3 gap-2" onClick={() => void fetchList()}>
+   354→                  <RefreshCw className="h-4 w-4" aria-hidden /> Retry
+   355→                </Button>
+   356→              </div>
+   357→            </div>
+   358→          </CardContent>
+   359→        </Card>
+   360→      )}
+   361→
+   362→      {/* Empty */}
+   363→      {state.status === "success" && filteredApps.length === 0 && (
+   364→        <Card>
+   365→          <CardContent className="p-8 text-center">
+   366→            <FileCheck className="mx-auto h-10 w-10 text-muted-foreground" aria-hidden />
+   367→            <p className="mt-3 text-sm font-medium">
+   368→              {search ? "No matching applications" : `No ${statusFilter !== "all" ? statusFilter : ""} applications`}
+   369→            </p>
+   370→            <p className="mt-1 text-xs text-muted-foreground">
+   371→              {search
+   372→                ? "Try a different search term."
+   373→                : statusFilter === "pending"
+   374→                  ? "New registration applications from the public form will appear here for review."
+   375→                  : `No ${statusFilter} applications in this academy.`}
+   376→            </p>
+   377→          </CardContent>
+   378→        </Card>
+   379→      )}
+   380→
+   381→      {/* Application cards */}
+   382→      {state.status === "success" && filteredApps.length > 0 && (
+   383→        <div className="space-y-3">
+   384→          {filteredApps.map((app) => (
+   385→            <ApplicationCard
+   386→              key={app.id}
+   387→              app={app}
+   388→              academyId={academyId}
+   389→              onApproveDone={() => {
+   390→                // Optimistic remove immediately, then silent refetch.
+   391→                // Silent = don't flash loading state, don't replace list
+   392→                // with error on refetch failure (the mutation already
+   393→                // succeeded, so the optimistic state is correct).
+   394→                optimisticRemove(app.id);
+   395→                void fetchList(true);
+   396→              }}
+   397→              onReject={() => setRejectingApp(app)}
+   398→            />
+   399→          ))}
+   400→        </div>
+   401→      )}
+   402→
+   403→      {/* Reject dialog */}
+   404→      {rejectingApp && (
+   405→        <RejectDialog
+   406→          key={`reject-${rejectingApp.id}`}
+   407→          open={rejectingApp !== null}
+   408→          app={rejectingApp}
+   409→          academyId={academyId}
+   410→          onClose={() => setRejectingApp(null)}
+   411→          onRejected={() => {
+   412→            // Optimistic remove immediately, then silent refetch.
+   413→            optimisticRemove(rejectingApp.id);
+   414→            setRejectingApp(null);
+   415→            void fetchList(true);
+   416→          }}
+   417→        />
+   418→      )}
+   419→    </div>
+   420→  );
+   421→}
+   422→
+   423→// ============================================================================
+   424→// Application Card
+   425→// ============================================================================
+   426→
+   427→function ApplicationCard({
+   428→  app,
+   429→  academyId,
+   430→  onApproveDone,
+   431→  onReject,
+   432→}: {
+   433→  app: RegistrationApplication;
+   434→  academyId: string;
+   435→  onApproveDone: () => void;
+   436→  onReject: () => void;
+   437→}) {
+   438→  const [approving, setApproving] = useState(false);
+   439→  const [approveError, setApproveError] = useState<string | null>(null);
+   440→  const [showDetails, setShowDetails] = useState(false);
+   441→
+   442→  const handleApprove = async () => {
+   443→    setApproving(true);
+   444→    setApproveError(null);
+   445→    try {
+   446→      const res = await adminFetch(
+   447→        `/api/admin/registrations/${app.id}/approve?academyId=${academyId}`,
+   448→        "POST",
+   449→      );
+   450→      if (res.ok) {
+   451→        onApproveDone();
+   452→        return;
+   453→      }
+   454→      const data = (await res.json()) as { error?: { message?: string } };
+   455→      setApproveError(data.error?.message ?? `Error ${res.status}`);
+   456→    } catch {
+   457→      setApproveError("Network error");
+   458→    } finally {
+   459→      setApproving(false);
+   460→    }
+   461→  };
+   462→
+   463→  const contact = app.preferredContact ? CONTACT_META[app.preferredContact] : null;
+   464→  const ContactIcon = contact?.icon ?? Phone;
+   465→
+   466→  return (
+   467→    <Card
+   468→      className={`transition-all ${
+   469→        app.status === "pending"
+   470→          ? "border-amber-200 dark:border-amber-900/50"
+   471→          : app.status === "approved"
+   472→            ? "border-emerald-200 dark:border-emerald-900/50"
+   473→            : "border-rose-200 dark:border-rose-900/50"
+   474→      }`}
+   475→    >
+   476→      <CardContent className="p-4">
+   477→        <div className="flex flex-col gap-3">
+   478→          {/* Top row: status badge + submitted time */}
+   479→          <div className="flex items-center justify-between gap-2">
+   480→            <div className="flex items-center gap-2">
+   481→              {app.status === "pending" && (
+   482→                <Badge className="bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-400">
+   483→                  <Clock className="h-3 w-3 mr-1" aria-hidden /> Pending
+   484→                </Badge>
+   485→              )}
+   486→              {app.status === "approved" && (
+   487→                <Badge className="bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-400">
+   488→                  <CheckCircle2 className="h-3 w-3 mr-1" aria-hidden /> Approved
+   489→                </Badge>
+   490→              )}
+   491→              {app.status === "rejected" && (
+   492→                <Badge className="bg-rose-100 text-rose-700 dark:bg-rose-950 dark:text-rose-400">
+   493→                  <XCircle className="h-3 w-3 mr-1" aria-hidden /> Rejected
+   494→                </Badge>
+   495→              )}
+   496→              <span className="text-xs text-muted-foreground">
+   497→                Submitted {formatTimestamp(app.submittedAt)}
+   498→              </span>
+   499→            </div>
+   500→            <Button
+   501→              variant="ghost"
+   502→              size="sm"
+   503→              onClick={() => setShowDetails((v) => !v)}
+   504→              className="text-xs"
+   505→            >
+   506→              {showDetails ? "Hide" : "Details"}
+   507→            </Button>
+   508→          </div>
+   509→
+   510→          {/* Main info: parent + child */}
+   511→          <div className="grid gap-3 sm:grid-cols-2">
+   512→            {/* Parent */}
+   513→            <div className="space-y-1.5">
+   514→              <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Parent / Guardian</p>
+   515→              <div className="flex items-center gap-2">
+   516→                <div className="flex h-7 w-7 items-center justify-center rounded-full bg-primary/10 text-xs font-semibold text-primary">
+   517→                  {app.parentFullName.charAt(0).toUpperCase()}
+   518→                </div>
+   519→                <p className="text-sm font-medium">{app.parentFullName}</p>
+   520→              </div>
+   521→              <div className="flex items-center gap-1.5 text-sm text-muted-foreground">
+   522→                <Phone className="h-3.5 w-3.5" aria-hidden />
+   523→                <span>{app.parentPhone}</span>
+   524→              </div>
+   525→              {app.parentEmail && (
+   526→                <div className="flex items-center gap-1.5 text-sm text-muted-foreground">
+   527→                  <Mail className="h-3.5 w-3.5" aria-hidden />
+   528→                  <span className="truncate">{app.parentEmail}</span>
+   529→                </div>
+   530→              )}
+   531→              {contact && (
+   532→                <div className="flex items-center gap-1.5 text-xs">
+   533→                  <ContactIcon className={`h-3.5 w-3.5 ${contact.color}`} aria-hidden />
+   534→                  <span className="text-muted-foreground">Prefers: {contact.label}</span>
+   535→                </div>
+   536→              )}
+   537→            </div>
+   538→
+   539→            {/* Child */}
+   540→            <div className="space-y-1.5">
+   541→              <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Child</p>
+   542→              <div className="flex items-center gap-2">
+   543→                <div className="flex h-7 w-7 items-center justify-center rounded-full bg-accent text-xs font-semibold text-accent-foreground">
+   544→                  {app.childFullName.charAt(0).toUpperCase()}
+   545→                </div>
+   546→                <p className="text-sm font-medium">{app.childFullName}</p>
+   547→              </div>
+   548→              {app.childDateOfBirth && (
+   549→                <div className="flex items-center gap-1.5 text-sm text-muted-foreground">
+   550→                  <Calendar className="h-3.5 w-3.5" aria-hidden />
+   551→                  <span>
+   552→                    {formatDate(app.childDateOfBirth)} ({ageFromDob(app.childDateOfBirth)})
+   553→                  </span>
+   554→                </div>
+   555→              )}
+   556→              {app.classPreference && (
+   557→                <div className="flex items-center gap-1.5 text-sm text-muted-foreground">
+   558→                  <Users className="h-3.5 w-3.5" aria-hidden />
+   559→                  <span>Class: {app.classPreference}</span>
+   560→                </div>
+   561→              )}
+   562→              {app.preferredDay && (
+   563→                <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+   564→                  <span>Preferred day: {app.preferredDay}</span>
+   565→                </div>
+   566→              )}
+   567→            </div>
+   568→          </div>
+   569→
+   570→          {/* Notes */}
+   571→          {app.notes && (
+   572→            <div className="rounded-lg bg-muted/40 p-2.5">
+   573→              <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Notes</p>
+   574→              <p className="mt-0.5 text-sm">{app.notes}</p>
+   575→            </div>
+   576→          )}
+   577→
+   578→          {/* Expanded details for reviewed apps */}
+   579→          {showDetails && app.status !== "pending" && (
+   580→            <div className="space-y-1.5 rounded-lg border p-2.5 text-xs">
+   581→              <p className="font-medium uppercase tracking-wide text-muted-foreground">Review</p>
+   582→              <div className="flex items-center gap-1.5">
+   583→                <User className="h-3.5 w-3.5 text-muted-foreground" aria-hidden />
+   584→                <span>Reviewed: {formatTimestamp(app.reviewedAt)}</span>
+   585→              </div>
+   586→              {app.status === "approved" && app.studentId && (
+   587→                <div className="flex items-center gap-1.5 text-emerald-700 dark:text-emerald-400">
+   588→                  <CheckCircle2 className="h-3.5 w-3.5" aria-hidden />
+   589→                  <span>Student created (ID: {app.studentId.slice(0, 8)}…)</span>
+   590→                </div>
+   591→              )}
+   592→              {app.status === "rejected" && app.rejectionReason && (
+   593→                <div className="mt-1 rounded bg-rose-50 p-2 text-rose-700 dark:bg-rose-950/50 dark:text-rose-400">
+   594→                  <span className="font-medium">Reason: </span>
+   595→                  {app.rejectionReason}
+   596→                </div>
+   597→              )}
+   598→            </div>
+   599→          )}
+   600→
+   601→          {/* Approve error */}
+   602→          {approveError && (
+   603→            <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 p-2.5">
+   604→              <AlertCircle className="h-4 w-4 text-destructive flex-shrink-0 mt-0.5" aria-hidden />
+   605→              <p className="text-sm text-destructive">{approveError}</p>
+   606→            </div>
+   607→          )}
+   608→
+   609→          {/* Action buttons for pending */}
+   610→          {app.status === "pending" && (
+   611→            <div className="flex items-center gap-2 border-t pt-3">
+   612→              <Button
+   613→                size="sm"
+   614→                onClick={handleApprove}
+   615→                disabled={approving}
+   616→                className="gap-1.5 bg-emerald-600 hover:bg-emerald-700"
+   617→              >
+   618→                {approving ? (
+   619→                  <>
+   620→                    <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden /> Approving…
+   621→                  </>
+   622→                ) : (
+   623→                  <>
+   624→                    <Check className="h-3.5 w-3.5" aria-hidden /> Approve
+   625→                  </>
+   626→                )}
+   627→              </Button>
+   628→              <Button
+   629→                size="sm"
+   630→                variant="outline"
+   631→                onClick={onReject}
+   632→                disabled={approving}
+   633→                className="gap-1.5 border-rose-200 text-rose-700 hover:bg-rose-50 dark:border-rose-900 dark:text-rose-400 dark:hover:bg-rose-950"
+   634→              >
+   635→                <X className="h-3.5 w-3.5" aria-hidden /> Reject
+   636→              </Button>
+   637→            </div>
+   638→          )}
+   639→        </div>
+   640→      </CardContent>
+   641→    </Card>
+   642→  );
+   643→}
+   644→
+   645→// ============================================================================
+   646→// Reject Dialog
+   647→// ============================================================================
+   648→
+   649→function RejectDialog({
+   650→  open,
+   651→  app,
+   652→  academyId,
+   653→  onClose,
+   654→  onRejected,
+   655→}: {
+   656→  open: boolean;
+   657→  app: RegistrationApplication;
+   658→  academyId: string;
+   659→  onClose: () => void;
+   660→  onRejected: () => void;
+   661→}) {
+   662→  const [reason, setReason] = useState("");
+   663→  const [submitting, setSubmitting] = useState(false);
+   664→  const [error, setError] = useState<string | null>(null);
+   665→
+   666→  useEffect(() => {
+   667→    if (open) {
+   668→      setReason("");
+   669→      setSubmitting(false);
+   670→      setError(null);
+   671→    }
+   672→  }, [open]);
+   673→
+   674→  const handleSubmit = async () => {
+   675→    if (!reason.trim()) {
+   676→      setError("A reason is required to reject an application.");
+   677→      return;
+   678→    }
+   679→    setSubmitting(true);
+   680→    setError(null);
+   681→    try {
+   682→      const res = await adminFetch(
+   683→        `/api/admin/registrations/${app.id}/reject?academyId=${academyId}`,
+   684→        "POST",
+   685→        { reason: reason.trim() },
+   686→      );
+   687→      if (res.ok) {
+   688→        onRejected();
+   689→        return;
+   690→      }
+   691→      const data = (await res.json()) as { error?: { message?: string } };
+   692→      setError(data.error?.message ?? `Error ${res.status}`);
+   693→    } catch {
+   694→      setError("Network error");
+   695→    } finally {
+   696→      setSubmitting(false);
+   697→    }
+   698→  };
+   699→
+   700→  const handleClose = () => {
+   701→    if (submitting) return;
+   702→    onClose();
+   703→  };
+   704→
+   705→  return (
+   706→    <Dialog open={open} onOpenChange={(v) => { if (!v) handleClose(); }}>
+   707→      <DialogContent className="sm:max-w-md">
+   708→        <DialogHeader>
+   709→          <DialogTitle>Reject Application</DialogTitle>
+   710→          <DialogDescription>
+   711→            Rejecting {app.parentFullName}&apos;s application for {app.childFullName}. A reason is required and will be recorded for audit.
+   712→          </DialogDescription>
+   713→        </DialogHeader>
+   714→        <div className="space-y-4">
+   715→          <div className="space-y-2">
+   716→            <Label htmlFor="reject-reason">Reason *</Label>
+   717→            <Textarea
+   718→              id="reject-reason"
+   719→              value={reason}
+   720→              onChange={(e) => setReason(e.target.value)}
+   721→              disabled={submitting}
+   722→              placeholder="e.g. Class is full, please try next term"
+   723→              rows={3}
+   724→            />
+   725→          </div>
+   726→          {error && (
+   727→            <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 p-3">
+   728→              <AlertCircle className="h-4 w-4 text-destructive flex-shrink-0 mt-0.5" aria-hidden />
+   729→              <p className="text-sm text-destructive">{error}</p>
+   730→            </div>
+   731→          )}
+   732→        </div>
+   733→        <DialogFooter className="gap-2">
+   734→          <Button variant="outline" onClick={handleClose} disabled={submitting}>
+   735→            Cancel
+   736→          </Button>
+   737→          <Button
+   738→            variant="destructive"
+   739→            onClick={handleSubmit}
+   740→            disabled={submitting}
+   741→            className="gap-1.5"
+   742→          >
+   743→            {submitting ? (
+   744→              <>
+   745→                <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> Rejecting…
+   746→              </>
+   747→            ) : (
+   748→              <>
+   749→                <X className="h-4 w-4" aria-hidden /> Reject Application
+   750→              </>
+   751→            )}
+   752→          </Button>
+   753→        </DialogFooter>
+   754→      </DialogContent>
+   755→    </Dialog>
+   756→  );
+   757→}
+   758→

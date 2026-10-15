@@ -1,0 +1,1863 @@
+     1→"use client";
+     2→
+     3→import { useState, useRef, useEffect, useCallback, useMemo } from "react";
+     4→import {
+     5→  LayoutDashboard,
+     6→  Users,
+     7→  CalendarDays,
+     8→  Package,
+     9→  ClipboardCheck,
+    10→  Wallet,
+    11→  FileText,
+    12→  FileCheck,
+    13→  Globe,
+    14→  AlertCircle,
+    15→  Loader2,
+    16→  RefreshCw,
+    17→  UserPlus,
+    18→  ArrowLeft,
+    19→  Search,
+    20→  Pencil,
+    21→  UserCog,
+    22→  Trash2,
+    23→  ArrowRightLeft,
+    24→} from "lucide-react";
+    25→import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+    26→import { Button } from "@/components/ui/button";
+    27→import { Badge } from "@/components/ui/badge";
+    28→import { Label } from "@/components/ui/label";
+    29→import { Input } from "@/components/ui/input";
+    30→import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+    31→import {
+    32→  Table,
+    33→  TableBody,
+    34→  TableCell,
+    35→  TableHead,
+    36→  TableHeader,
+    37→  TableRow,
+    38→} from "@/components/ui/table";
+    39→import {
+    40→  Dialog,
+    41→  DialogContent,
+    42→  DialogDescription,
+    43→  DialogFooter,
+    44→  DialogHeader,
+    45→  DialogTitle,
+    46→} from "@/components/ui/dialog";
+    47→import { Textarea } from "@/components/ui/textarea";
+    48→import { DashboardOverview } from "@/components/dashboard/DashboardOverview";
+    49→import { AttendanceManagement } from "@/components/admin/AttendanceManagement";
+    50→import { PackagesManagement } from "@/components/admin/PackagesManagement";
+    51→import { PaymentsManagement } from "@/components/admin/PaymentsManagement";
+    52→import { RegistrationsManagement } from "@/components/admin/RegistrationsManagement";
+    53→import { WebsiteContentManagement } from "@/components/admin/WebsiteContentManagement";
+    54→import { ReportsManagement } from "@/components/admin/ReportsManagement";
+    55→import { CSRF_HEADER } from "@/lib/auth/csrf";
+    56→
+    57→// Shared fetch helper for mutations (CSRF + JSON)
+    58→async function adminFetch(url: string, method: string, body: unknown): Promise<Response> {
+    59→  const csrfMatch = document.cookie.split("; ").find((c) => c.startsWith("futsal_csrf="));
+    60→  const csrfToken = csrfMatch?.split("=")[1] ?? "";
+    61→  return fetch(url, {
+    62→    method,
+    63→    credentials: "same-origin",
+    64→    headers: { "Content-Type": "application/json", [CSRF_HEADER]: csrfToken },
+    65→    body: JSON.stringify(body),
+    66→  });
+    67→}
+    68→
+    69→// === Types (match the actual API responses) ===============================
+    70→
+    71→interface StudentRow {
+    72→  id: string;
+    73→  academy_id: string;
+    74→  full_name: string;
+    75→  date_of_birth: string | null;
+    76→  gender: string | null;
+    77→  notes: string | null;
+    78→  archived_at: string | null;
+    79→}
+    80→
+    81→interface StudentDetail {
+    82→  id: string;
+    83→  academy_id: string;
+    84→  full_name: string;
+    85→  date_of_birth: string | null;
+    86→  gender: string | null;
+    87→  notes: string | null;
+    88→  archived_at: string | null;
+    89→}
+    90→
+    91→interface GuardianLink {
+    92→  id: string;
+    93→  guardian_user_id: string;
+    94→  student_id: string;
+    95→  is_primary: boolean;
+    96→  relationship: string | null;
+    97→}
+    98→
+    99→type AdminSection =
+   100→  | "dashboard"
+   101→  | "students"
+   102→  | "classes"
+   103→  | "packages"
+   104→  | "attendance"
+   105→  | "payments"
+   106→  | "registrations"
+   107→  | "reports"
+   108→  | "website";
+   109→
+   110→// === Navigation config ===================================================
+   111→
+   112→const NAV_ITEMS: { id: AdminSection; label: string; icon: React.ComponentType<{ className?: string }>; enabled: boolean }[] = [
+   113→  { id: "dashboard", label: "Dashboard", icon: LayoutDashboard, enabled: true },
+   114→  { id: "students", label: "Students", icon: Users, enabled: true },
+   115→  { id: "classes", label: "Classes", icon: CalendarDays, enabled: true },
+   116→  { id: "packages", label: "Packages", icon: Package, enabled: true },
+   117→  { id: "attendance", label: "Attendance", icon: ClipboardCheck, enabled: true },
+   118→  { id: "payments", label: "Payments & Expenses", icon: Wallet, enabled: true },
+   119→  { id: "registrations", label: "Registrations", icon: FileCheck, enabled: true },
+   120→  { id: "reports", label: "Reports", icon: FileText, enabled: true },
+   121→  { id: "website", label: "Website Content", icon: Globe, enabled: true },
+   122→];
+   123→
+   124→// === Main component =======================================================
+   125→
+   126→interface AdminShellProps {
+   127→  memberships: { academyId: string; role: string }[];
+   128→  selectedAcademyId: string;
+   129→  onSelectAcademy: (academyId: string) => void;
+   130→}
+   131→
+   132→export function AdminShell({ memberships, selectedAcademyId, onSelectAcademy }: AdminShellProps) {
+   133→  const [section, setSection] = useState<AdminSection>("dashboard");
+   134→  const adminMemberships = memberships.filter((m) => m.role === "admin");
+   135→
+   136→  return (
+   137→    <div className="space-y-4">
+   138→      {/* Academy selector */}
+   139→      <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+   140→        <div className="space-y-1.5">
+   141→          {adminMemberships.length > 1 ? (
+   142→            <>
+   143→              <Label htmlFor="admin-academy-select" className="text-xs text-muted-foreground">
+   144→                Academy
+   145→              </Label>
+   146→              <Select value={selectedAcademyId} onValueChange={onSelectAcademy}>
+   147→                <SelectTrigger id="admin-academy-select" className="w-full sm:w-72">
+   148→                  <SelectValue placeholder="Select academy" />
+   149→                </SelectTrigger>
+   150→                <SelectContent>
+   151→                  {adminMemberships.map((m) => (
+   152→                    <SelectItem key={m.academyId} value={m.academyId}>
+   153→                      Academy {m.academyId.slice(0, 8)}
+   154→                    </SelectItem>
+   155→                  ))}
+   156→                </SelectContent>
+   157→              </Select>
+   158→            </>
+   159→          ) : (
+   160→            <p className="text-sm text-muted-foreground">
+   161→              Academy{" "}
+   162→              <code className="rounded bg-muted px-1 py-0.5 text-xs">
+   163→                {selectedAcademyId.slice(0, 8)}
+   164→              </code>
+   165→            </p>
+   166→          )}
+   167→        </div>
+   168→      </div>
+   169→
+   170→      {/* Navigation */}
+   171→      <div className="flex gap-1 overflow-x-auto rounded-lg bg-muted p-1" role="tablist" aria-label="Admin sections">
+   172→        {NAV_ITEMS.map((item) => {
+   173→          const Icon = item.icon;
+   174→          return (
+   175→            <button
+   176→              key={item.id}
+   177→              type="button"
+   178→              role="tab"
+   179→              aria-selected={section === item.id}
+   180→              disabled={!item.enabled}
+   181→              onClick={() => item.enabled && setSection(item.id)}
+   182→              className={`flex items-center gap-2 rounded-md px-3 py-1.5 text-sm font-medium transition-colors whitespace-nowrap ${
+   183→                section === item.id
+   184→                  ? "bg-background text-foreground shadow-sm"
+   185→                  : item.enabled
+   186→                    ? "text-muted-foreground hover:text-foreground"
+   187→                    : "text-muted-foreground/50 cursor-not-allowed"
+   188→              }`}
+   189→            >
+   190→              <Icon className="h-4 w-4" aria-hidden /> {item.label}
+   191→              {!item.enabled && <span className="text-xs">(soon)</span>}
+   192→            </button>
+   193→          );
+   194→        })}
+   195→      </div>
+   196→
+   197→      {/* Section content */}
+   198→      <div className="min-h-[300px]">
+   199→        {section === "dashboard" && (
+   200→          <DashboardOverview
+   201→            memberships={memberships}
+   202→            selectedAcademyId={selectedAcademyId}
+   203→            onSelectAcademy={onSelectAcademy}
+   204→          />
+   205→        )}
+   206→        {section === "students" && (
+   207→          <StudentManagement
+   208→            academyId={selectedAcademyId}
+   209→          />
+   210→        )}
+   211→        {section === "classes" && (
+   212→          <ClassManagement academyId={selectedAcademyId} />
+   213→        )}
+   214→        {section === "packages" && (
+   215→          <PackagesManagement academyId={selectedAcademyId} />
+   216→        )}
+   217→        {section === "attendance" && (
+   218→          <AttendanceManagement academyId={selectedAcademyId} />
+   219→        )}
+   220→        {section === "payments" && (
+   221→          <PaymentsManagement academyId={selectedAcademyId} />
+   222→        )}
+   223→        {section === "registrations" && (
+   224→          <RegistrationsManagement academyId={selectedAcademyId} />
+   225→        )}
+   226→        {section === "website" && (
+   227→          <WebsiteContentManagement key={selectedAcademyId} academyId={selectedAcademyId} />
+   228→        )}
+   229→        {section === "reports" && (
+   230→          <ReportsManagement key={selectedAcademyId} academyId={selectedAcademyId} />
+   231→        )}
+   232→        {section !== "dashboard" && section !== "students" && section !== "classes" && section !== "packages" && section !== "attendance" && section !== "payments" && section !== "registrations" && section !== "website" && section !== "reports" && (
+   233→          <Card>
+   234→            <CardContent className="p-8 text-center">
+   235→              <p className="text-sm font-medium text-muted-foreground">Coming soon</p>
+   236→              <p className="mt-1 text-xs text-muted-foreground">
+   237→                This section will be implemented in a future phase.
+   238→              </p>
+   239→            </CardContent>
+   240→          </Card>
+   241→        )}
+   242→      </div>
+   243→    </div>
+   244→  );
+   245→}
+   246→
+   247→// === Student Management ==================================================
+   248→
+   249→type ListState =
+   250→  | { status: "loading" }
+   251→  | { status: "success"; data: StudentRow[] }
+   252→  | { status: "error"; message: string };
+   253→
+   254→function StudentManagement({ academyId }: { academyId: string }) {
+   255→  const [state, setState] = useState<ListState>({ status: "loading" });
+   256→  const [searchQuery, setSearchQuery] = useState("");
+   257→  const [selectedStudentId, setSelectedStudentId] = useState<string | null>(null);
+   258→  const [showCreateDialog, setShowCreateDialog] = useState(false);
+   259→
+   260→  const academyIdRef = useRef(academyId);
+   261→  useEffect(() => { academyIdRef.current = academyId; }, [academyId]);
+   262→
+   263→  const fetchList = useCallback(async () => {
+   264→    const aid = academyId;
+   265→    setState({ status: "loading" });
+   266→    try {
+   267→      const res = await fetch(`/api/admin/students?academyId=${aid}`, { credentials: "same-origin" });
+   268→      const data = (await res.json()) as { students?: StudentRow[]; error?: { message?: string } };
+   269→      if (aid !== academyIdRef.current) return;
+   270→      if (!res.ok || !data.students) {
+   271→        setState({ status: "error", message: data.error?.message ?? `Error ${res.status}` });
+   272→        return;
+   273→      }
+   274→      setState({ status: "success", data: data.students });
+   275→    } catch {
+   276→      if (aid !== academyIdRef.current) return;
+   277→      setState({ status: "error", message: "Network error" });
+   278→    }
+   279→  }, [academyId]);
+   280→
+   281→  useEffect(() => {
+   282→    if (!academyId) return;
+   283→    let cancelled = false;
+   284→    const aid = academyId;
+   285→    void (async () => {
+   286→      try {
+   287→        const res = await fetch(`/api/admin/students?academyId=${aid}`, { credentials: "same-origin" });
+   288→        if (cancelled) return;
+   289→        const data = (await res.json()) as { students?: StudentRow[]; error?: { message?: string } };
+   290→        if (cancelled) return;
+   291→        if (!res.ok || !data.students) {
+   292→          setState({ status: "error", message: data.error?.message ?? `Error ${res.status}` });
+   293→          return;
+   294→        }
+   295→        setState({ status: "success", data: data.students });
+   296→      } catch {
+   297→        if (cancelled) return;
+   298→        setState({ status: "error", message: "Network error" });
+   299→      }
+   300→    })();
+   301→    return () => { cancelled = true; };
+   302→  }, [academyId]);
+   303→
+   304→  // Client-side search filtering (API doesn't support search params)
+   305→  const filteredStudents = useMemo(() => {
+   306→    if (state.status !== "success") return [];
+   307→    const q = searchQuery.toLowerCase().trim();
+   308→    if (!q) return state.data;
+   309→    return state.data.filter((s) =>
+   310→      s.full_name.toLowerCase().includes(q)
+   311→    );
+   312→  }, [state, searchQuery]);
+   313→
+   314→  // Student detail view
+   315→  if (selectedStudentId) {
+   316→    return (
+   317→      <StudentDetail
+   318→        studentId={selectedStudentId}
+   319→        academyId={academyId}
+   320→        onBack={() => { setSelectedStudentId(null); fetchList(); }}
+   321→      />
+   322→    );
+   323→  }
+   324→
+   325→  return (
+   326→    <div className="space-y-4">
+   327→      {/* Toolbar */}
+   328→      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+   329→        <div className="relative max-w-xs flex-1">
+   330→          <Search className="absolute left-2 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" aria-hidden />
+   331→          <Input
+   332→            placeholder="Search students…"
+   333→            value={searchQuery}
+   334→            onChange={(e) => setSearchQuery(e.target.value)}
+   335→            className="pl-8"
+   336→            disabled={state.status === "loading"}
+   337→          />
+   338→        </div>
+   339→        <Button className="gap-2" onClick={() => setShowCreateDialog(true)}>
+   340→          <UserPlus className="h-4 w-4" aria-hidden /> Add Student
+   341→        </Button>
+   342→      </div>
+   343→
+   344→      {/* States */}
+   345→      {state.status === "loading" && (
+   346→        <Card>
+   347→          <CardContent className="flex items-center gap-3 p-6">
+   348→            <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" aria-hidden />
+   349→            <p className="text-sm text-muted-foreground">Loading students…</p>
+   350→          </CardContent>
+   351→        </Card>
+   352→      )}
+   353→
+   354→      {state.status === "error" && (
+   355→        <Card className="border-destructive/30">
+   356→          <CardContent className="p-6">
+   357→            <div className="flex items-start gap-3">
+   358→              <AlertCircle className="h-5 w-5 text-destructive flex-shrink-0 mt-0.5" aria-hidden />
+   359→              <div>
+   360→                <p className="text-sm font-medium text-destructive">Failed to load students</p>
+   361→                <p className="mt-1 text-sm text-muted-foreground">{state.message}</p>
+   362→                <Button variant="outline" size="sm" className="mt-3 gap-2" onClick={fetchList}>
+   363→                  <RefreshCw className="h-4 w-4" aria-hidden /> Retry
+   364→                </Button>
+   365→              </div>
+   366→            </div>
+   367→          </CardContent>
+   368→        </Card>
+   369→      )}
+   370→
+   371→      {state.status === "success" && (
+   372→        <>
+   373→          {filteredStudents.length === 0 ? (
+   374→            <Card>
+   375→              <CardContent className="p-8 text-center">
+   376→                <Users className="mx-auto h-8 w-8 text-muted-foreground" aria-hidden />
+   377→                <p className="mt-3 text-sm font-medium">
+   378→                  {searchQuery ? "No students match your search" : "No students"}
+   379→                </p>
+   380→                <p className="mt-1 text-sm text-muted-foreground">
+   381→                  {searchQuery
+   382→                    ? "Try a different search term."
+   383→                    : "Click 'Add Student' to create the first student."}
+   384→                </p>
+   385→              </CardContent>
+   386→            </Card>
+   387→          ) : (
+   388→            <>
+   389→              <Badge variant="secondary">
+   390→                {filteredStudents.length} student{filteredStudents.length !== 1 ? "s" : ""}
+   391→              </Badge>
+   392→              {/* Desktop: table */}
+   393→              <Card>
+   394→                <CardContent className="p-0">
+   395→                  <div className="hidden sm:block">
+   396→                    <Table>
+   397→                      <TableHeader>
+   398→                        <TableRow>
+   399→                          <TableHead>Name</TableHead>
+   400→                          <TableHead>Date of Birth</TableHead>
+   401→                          <TableHead>Gender</TableHead>
+   402→                          <TableHead className="hidden md:table-cell">Notes</TableHead>
+   403→                        </TableRow>
+   404→                      </TableHeader>
+   405→                      <TableBody>
+   406→                        {filteredStudents.map((s) => (
+   407→                          <TableRow
+   408→                            key={s.id}
+   409→                            className="cursor-pointer hover:bg-muted/50"
+   410→                            onClick={() => setSelectedStudentId(s.id)}
+   411→                          >
+   412→                            <TableCell className="font-medium">{s.full_name}</TableCell>
+   413→                            <TableCell className="tabular-nums">{s.date_of_birth ?? "—"}</TableCell>
+   414→                            <TableCell>{s.gender ?? "—"}</TableCell>
+   415→                            <TableCell className="max-w-xs truncate text-muted-foreground hidden md:table-cell">
+   416→                              {s.notes ?? "—"}
+   417→                            </TableCell>
+   418→                          </TableRow>
+   419→                        ))}
+   420→                      </TableBody>
+   421→                    </Table>
+   422→                  </div>
+   423→                  {/* Mobile: cards */}
+   424→                  <div className="divide-y sm:hidden">
+   425→                    {filteredStudents.map((s) => (
+   426→                      <button
+   427→                        key={s.id}
+   428→                        type="button"
+   429→                        className="w-full p-4 text-left hover:bg-muted/50"
+   430→                        onClick={() => setSelectedStudentId(s.id)}
+   431→                      >
+   432→                        <p className="font-medium">{s.full_name}</p>
+   433→                        <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-sm text-muted-foreground">
+   434→                          {s.date_of_birth && <span className="tabular-nums">{s.date_of_birth}</span>}
+   435→                          {s.gender && <span>{s.gender}</span>}
+   436→                        </div>
+   437→                      </button>
+   438→                    ))}
+   439→                  </div>
+   440→                </CardContent>
+   441→              </Card>
+   442→            </>
+   443→          )}
+   444→        </>
+   445→      )}
+   446→
+   447→      {/* Create student dialog */}
+   448→      <CreateStudentDialog
+   449→        open={showCreateDialog}
+   450→        onClose={() => setShowCreateDialog(false)}
+   451→        academyId={academyId}
+   452→        onCreated={() => { setShowCreateDialog(false); fetchList(); }}
+   453→      />
+   454→    </div>
+   455→  );
+   456→}
+   457→
+   458→// === Create Student Dialog ===============================================
+   459→
+   460→function CreateStudentDialog({
+   461→  open,
+   462→  onClose,
+   463→  academyId,
+   464→  onCreated,
+   465→}: {
+   466→  open: boolean;
+   467→  onClose: () => void;
+   468→  academyId: string;
+   469→  onCreated: () => void;
+   470→}) {
+   471→  const [fullName, setFullName] = useState("");
+   472→  const [dateOfBirth, setDateOfBirth] = useState("");
+   473→  const [gender, setGender] = useState("");
+   474→  const [notes, setNotes] = useState("");
+   475→  const [submitting, setSubmitting] = useState(false);
+   476→  const [error, setError] = useState<string | null>(null);
+   477→
+   478→  useEffect(() => {
+   479→    if (open) {
+   480→      setFullName(""); setDateOfBirth(""); setGender(""); setNotes("");
+   481→      setSubmitting(false); setError(null);
+   482→    }
+   483→  }, [open]);
+   484→
+   485→  const handleSubmit = async () => {
+   486→    if (!fullName.trim()) { setError("Full name is required."); return; }
+   487→    setSubmitting(true);
+   488→    setError(null);
+   489→    try {
+   490→      const csrfMatch = document.cookie.split("; ").find((c) => c.startsWith("futsal_csrf="));
+   491→      const csrfToken = csrfMatch?.split("=")[1] ?? "";
+   492→      const body: Record<string, unknown> = { fullName: fullName.trim() };
+   493→      if (dateOfBirth) body.dateOfBirth = dateOfBirth;
+   494→      if (gender) body.gender = gender;
+   495→      if (notes.trim()) body.notes = notes.trim();
+   496→      const res = await fetch(`/api/admin/students?academyId=${academyId}`, {
+   497→        method: "POST",
+   498→        credentials: "same-origin",
+   499→        headers: { "Content-Type": "application/json", [CSRF_HEADER]: csrfToken },
+   500→        body: JSON.stringify(body),
+   501→      });
+   502→      if (res.status === 201) { onCreated(); return; }
+   503→      const data = (await res.json()) as { error?: { message?: string } };
+   504→      setError(data.error?.message ?? `Error ${res.status}`);
+   505→    } catch {
+   506→      setError("Network error — could not reach the server.");
+   507→    } finally {
+   508→      setSubmitting(false);
+   509→    }
+   510→  };
+   511→
+   512→  const handleClose = () => {
+   513→    if (submitting) return;
+   514→    onClose();
+   515→  };
+   516→
+   517→  return (
+   518→    <Dialog open={open} onOpenChange={(v) => { if (!v) handleClose(); }}>
+   519→      <DialogContent className="sm:max-w-md">
+   520→        <DialogHeader>
+   521→          <DialogTitle>Add New Student</DialogTitle>
+   522→          <DialogDescription>Create a new student in this academy.</DialogDescription>
+   523→        </DialogHeader>
+   524→        <div className="space-y-4">
+   525→          <div className="space-y-2">
+   526→            <Label htmlFor="create-fullName">Full Name *</Label>
+   527→            <Input id="create-fullName" value={fullName} onChange={(e) => setFullName(e.target.value)} disabled={submitting} placeholder="e.g., Budi Santoso" />
+   528→          </div>
+   529→          <div className="space-y-2">
+   530→            <Label htmlFor="create-dob">Date of Birth</Label>
+   531→            <Input id="create-dob" type="date" value={dateOfBirth} onChange={(e) => setDateOfBirth(e.target.value)} disabled={submitting} />
+   532→          </div>
+   533→          <div className="space-y-2">
+   534→            <Label htmlFor="create-gender">Gender</Label>
+   535→            <Select value={gender} onValueChange={setGender} disabled={submitting}>
+   536→              <SelectTrigger id="create-gender"><SelectValue placeholder="Select gender" /></SelectTrigger>
+   537→              <SelectContent>
+   538→                <SelectItem value="male">Male</SelectItem>
+   539→                <SelectItem value="female">Female</SelectItem>
+   540→                <SelectItem value="unspecified">Unspecified</SelectItem>
+   541→              </SelectContent>
+   542→            </Select>
+   543→          </div>
+   544→          <div className="space-y-2">
+   545→            <Label htmlFor="create-notes">Notes</Label>
+   546→            <Textarea id="create-notes" value={notes} onChange={(e) => setNotes(e.target.value)} disabled={submitting} rows={2} placeholder="Optional notes…" />
+   547→          </div>
+   548→          {error && (
+   549→            <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 p-3">
+   550→              <AlertCircle className="h-4 w-4 text-destructive flex-shrink-0 mt-0.5" aria-hidden />
+   551→              <p className="text-sm text-destructive">{error}</p>
+   552→            </div>
+   553→          )}
+   554→        </div>
+   555→        <DialogFooter className="gap-2">
+   556→          <Button variant="outline" onClick={handleClose} disabled={submitting}>Cancel</Button>
+   557→          <Button onClick={handleSubmit} disabled={submitting}>
+   558→            {submitting ? <><Loader2 className="h-4 w-4 animate-spin" aria-hidden /> Creating…</> : "Create Student"}
+   559→          </Button>
+   560→        </DialogFooter>
+   561→      </DialogContent>
+   562→    </Dialog>
+   563→  );
+   564→}
+   565→
+   566→// === Student Detail ======================================================
+   567→
+   568→type DetailState =
+   569→  | { status: "loading" }
+   570→  | { status: "success"; student: StudentDetail; guardians: GuardianLink[]; enrollments: EnrollmentRow[] }
+   571→  | { status: "error"; message: string };
+   572→
+   573→interface EnrollmentRow {
+   574→  id: string;
+   575→  student_id: string;
+   576→  class_id: string;
+   577→  class_name: string | null;
+   578→  effective_from: string;
+   579→  effective_to: string | null;
+   580→}
+   581→
+   582→function StudentDetail({
+   583→  studentId,
+   584→  academyId,
+   585→  onBack,
+   586→}: {
+   587→  studentId: string;
+   588→  academyId: string;
+   589→  onBack: () => void;
+   590→}) {
+   591→  const [state, setState] = useState<DetailState>({ status: "loading" });
+   592→  const [showEdit, setShowEdit] = useState(false);
+   593→  const [showAddGuardian, setShowAddGuardian] = useState(false);
+   594→  const [showEnroll, setShowEnroll] = useState(false);
+   595→  const [showTransfer, setShowTransfer] = useState(false);
+   596→
+   597→  const refetch = useCallback(async () => {
+   598→    let cancelled = false;
+   599→    setState({ status: "loading" });
+   600→    try {
+   601→      const [studentRes, guardianRes, enrollRes] = await Promise.all([
+   602→        fetch(`/api/admin/students/${studentId}?academyId=${academyId}`, { credentials: "same-origin" }),
+   603→        fetch(`/api/admin/students/${studentId}/guardians?academyId=${academyId}`, { credentials: "same-origin" }),
+   604→        fetch(`/api/admin/students/${studentId}/enrollments?academyId=${academyId}`, { credentials: "same-origin" }),
+   605→      ]);
+   606→      if (cancelled) return;
+   607→      if (!studentRes.ok) {
+   608→        const err = (await studentRes.json()) as { error?: { message?: string } };
+   609→        setState({ status: "error", message: err.error?.message ?? `Error ${studentRes.status}` });
+   610→        return;
+   611→      }
+   612→      const student = (await studentRes.json()) as StudentDetail;
+   613→      const guardianData = guardianRes.ok ? ((await guardianRes.json()) as { guardians?: GuardianLink[] }).guardians ?? [] : [];
+   614→      const enrollmentData = enrollRes.ok ? ((await enrollRes.json()) as { enrollments?: EnrollmentRow[] }).enrollments ?? [] : [];
+   615→      if (cancelled) return;
+   616→      setState({ status: "success", student, guardians: guardianData, enrollments: enrollmentData });
+   617→    } catch {
+   618→      if (cancelled) return;
+   619→      setState({ status: "error", message: "Network error" });
+   620→    }
+   621→    return () => { cancelled = true; };
+   622→  }, [studentId, academyId]);
+   623→
+   624→  // Initial load — use an IIFE pattern to avoid the cascading-render
+   625→  // lint warning that occurs when calling a useCallback that triggers
+   626→  // setState. The IIFE captures the fetch inline.
+   627→  useEffect(() => {
+   628→    let cancelled = false;
+   629→    void (async () => {
+   630→      try {
+   631→        const [studentRes, guardianRes, enrollRes] = await Promise.all([
+   632→          fetch(`/api/admin/students/${studentId}?academyId=${academyId}`, { credentials: "same-origin" }),
+   633→          fetch(`/api/admin/students/${studentId}/guardians?academyId=${academyId}`, { credentials: "same-origin" }),
+   634→          fetch(`/api/admin/students/${studentId}/enrollments?academyId=${academyId}`, { credentials: "same-origin" }),
+   635→        ]);
+   636→        if (cancelled) return;
+   637→        if (!studentRes.ok) {
+   638→          const err = (await studentRes.json()) as { error?: { message?: string } };
+   639→          if (!cancelled) setState({ status: "error", message: err.error?.message ?? `Error ${studentRes.status}` });
+   640→          return;
+   641→        }
+   642→        const student = (await studentRes.json()) as StudentDetail;
+   643→        const guardianData = guardianRes.ok ? ((await guardianRes.json()) as { guardians?: GuardianLink[] }).guardians ?? [] : [];
+   644→        const enrollmentData = enrollRes.ok ? ((await enrollRes.json()) as { enrollments?: EnrollmentRow[] }).enrollments ?? [] : [];
+   645→        if (cancelled) return;
+   646→        setState({ status: "success", student, guardians: guardianData, enrollments: enrollmentData });
+   647→      } catch {
+   648→        if (!cancelled) setState({ status: "error", message: "Network error" });
+   649→      }
+   650→    })();
+   651→    return () => { cancelled = true; };
+   652→  }, [studentId, academyId]);
+   653→
+   654→  if (state.status === "loading") {
+   655→    return (
+   656→      <Card><CardContent className="flex items-center gap-3 p-6">
+   657→        <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" aria-hidden />
+   658→        <p className="text-sm text-muted-foreground">Loading student…</p>
+   659→      </CardContent></Card>
+   660→    );
+   661→  }
+   662→
+   663→  if (state.status === "error") {
+   664→    return (
+   665→      <Card className="border-destructive/30">
+   666→        <CardContent className="p-6">
+   667→          <div className="flex items-start gap-3">
+   668→            <AlertCircle className="h-5 w-5 text-destructive flex-shrink-0 mt-0.5" aria-hidden />
+   669→            <div>
+   670→              <p className="text-sm font-medium text-destructive">Failed to load student</p>
+   671→              <p className="mt-1 text-sm text-muted-foreground">{state.message}</p>
+   672→              <Button variant="outline" size="sm" className="mt-3 gap-2" onClick={onBack}>
+   673→                <ArrowLeft className="h-4 w-4" aria-hidden /> Back to list
+   674→              </Button>
+   675→            </div>
+   676→          </div>
+   677→        </CardContent>
+   678→      </Card>
+   679→    );
+   680→  }
+   681→
+   682→  const { student, guardians, enrollments } = state;
+   683→  const activeEnrollment = enrollments.find((e) => e.effective_to === null);
+   684→
+   685→  return (
+   686→    <div className="space-y-4">
+   687→      <div className="flex items-center justify-between gap-3">
+   688→        <div className="flex items-center gap-3">
+   689→          <Button variant="ghost" size="sm" onClick={onBack} className="gap-2">
+   690→            <ArrowLeft className="h-4 w-4" aria-hidden /> Back
+   691→          </Button>
+   692→          <div>
+   693→            <h2 className="text-lg font-semibold">{student.full_name}</h2>
+   694→            {student.archived_at && <Badge variant="outline">Archived</Badge>}
+   695→          </div>
+   696→        </div>
+   697→        <Button variant="outline" size="sm" className="gap-2" onClick={() => setShowEdit(true)}>
+   698→          <Pencil className="h-4 w-4" aria-hidden /> Edit
+   699→        </Button>
+   700→      </div>
+   701→
+   702→      {/* Student info */}
+   703→      <Card>
+   704→        <CardHeader><CardTitle className="text-base">Student Information</CardTitle></CardHeader>
+   705→        <CardContent className="space-y-2 text-sm">
+   706→          <div className="flex justify-between"><span className="text-muted-foreground">Date of Birth</span><span>{student.date_of_birth ?? "—"}</span></div>
+   707→          <div className="flex justify-between"><span className="text-muted-foreground">Gender</span><span>{student.gender ?? "—"}</span></div>
+   708→          {student.notes && <div className="pt-2"><span className="text-muted-foreground">Notes: </span>{student.notes}</div>}
+   709→        </CardContent>
+   710→      </Card>
+   711→
+   712→      {/* Guardians */}
+   713→      <Card>
+   714→        <CardHeader className="flex-row items-center justify-between">
+   715→          <CardTitle className="text-base">Guardians</CardTitle>
+   716→          <Button variant="outline" size="sm" className="gap-2" onClick={() => setShowAddGuardian(true)}>
+   717→            <UserCog className="h-4 w-4" aria-hidden /> Link Guardian
+   718→          </Button>
+   719→        </CardHeader>
+   720→        <CardContent>
+   721→          {guardians.length === 0 ? (
+   722→            <p className="text-sm text-muted-foreground">No guardians linked.</p>
+   723→          ) : (
+   724→            <div className="space-y-2">
+   725→              {guardians.map((g) => (
+   726→                <div key={g.id} className="flex items-center justify-between rounded-lg border p-3 text-sm">
+   727→                  <div>
+   728→                    <p className="font-medium">User {g.guardian_user_id.slice(0, 8)}…</p>
+   729→                    {g.relationship && <p className="text-muted-foreground">{g.relationship}</p>}
+   730→                  </div>
+   731→                  <div className="flex items-center gap-2">
+   732→                    {g.is_primary && <Badge>Primary</Badge>}
+   733→                    <RemoveGuardianButton
+   734→                      linkId={g.id}
+   735→                      studentId={studentId}
+   736→                      academyId={academyId}
+   737→                      onRemoved={refetch}
+   738→                    />
+   739→                  </div>
+   740→                </div>
+   741→              ))}
+   742→            </div>
+   743→          )}
+   744→        </CardContent>
+   745→      </Card>
+   746→
+   747→      {/* Enrollment */}
+   748→      <Card>
+   749→        <CardHeader className="flex-row items-center justify-between">
+   750→          <CardTitle className="text-base">Class Enrollment</CardTitle>
+   751→          <div className="flex gap-2">
+   752→            <Button variant="outline" size="sm" className="gap-2" onClick={() => setShowEnroll(true)}>
+   753→              <UserPlus className="h-4 w-4" aria-hidden /> Enroll
+   754→            </Button>
+   755→            {activeEnrollment && (
+   756→              <Button variant="outline" size="sm" className="gap-2" onClick={() => setShowTransfer(true)}>
+   757→                <ArrowRightLeft className="h-4 w-4" aria-hidden /> Transfer
+   758→              </Button>
+   759→            )}
+   760→          </div>
+   761→        </CardHeader>
+   762→        <CardContent>
+   763→          {enrollments.length === 0 ? (
+   764→            <p className="text-sm text-muted-foreground">Not enrolled in any class.</p>
+   765→          ) : (
+   766→            <div className="space-y-2">
+   767→              {enrollments.map((e) => (
+   768→                <div key={e.id} className="flex items-center justify-between rounded-lg border p-3 text-sm">
+   769→                  <div>
+   770→                    <p className="font-medium">{e.class_name ?? `Class ${e.class_id.slice(0, 8)}…`}</p>
+   771→                    <p className="text-muted-foreground">From: {e.effective_from}{e.effective_to ? ` → To: ${e.effective_to}` : " (active)"}</p>
+   772→                  </div>
+   773→                  {!e.effective_to && <Badge>Active</Badge>}
+   774→                </div>
+   775→              ))}
+   776→            </div>
+   777→          )}
+   778→        </CardContent>
+   779→      </Card>
+   780→
+   781→      {/* Dialogs */}
+   782→      {showEdit && (
+   783→        <EditStudentDialog
+   784→          open={showEdit}
+   785→          onClose={() => setShowEdit(false)}
+   786→          student={student}
+   787→          academyId={academyId}
+   788→          onSaved={() => { setShowEdit(false); refetch(); }}
+   789→        />
+   790→      )}
+   791→      {showAddGuardian && (
+   792→        <AddGuardianDialog
+   793→          open={showAddGuardian}
+   794→          onClose={() => setShowAddGuardian(false)}
+   795→          studentId={studentId}
+   796→          academyId={academyId}
+   797→          onAdded={() => { setShowAddGuardian(false); refetch(); }}
+   798→        />
+   799→      )}
+   800→      {showEnroll && (
+   801→        <EnrollDialog
+   802→          open={showEnroll}
+   803→          onClose={() => setShowEnroll(false)}
+   804→          studentId={studentId}
+   805→          academyId={academyId}
+   806→          onEnrolled={() => { setShowEnroll(false); refetch(); }}
+   807→        />
+   808→      )}
+   809→      {showTransfer && activeEnrollment && (
+   810→        <TransferDialog
+   811→          open={showTransfer}
+   812→          onClose={() => setShowTransfer(false)}
+   813→          studentId={studentId}
+   814→          academyId={academyId}
+   815→          currentClassName={activeEnrollment.class_name ?? "Current class"}
+   816→          onTransferred={() => { setShowTransfer(false); refetch(); }}
+   817→        />
+   818→      )}
+   819→    </div>
+   820→  );
+   821→}
+   822→
+   823→// === Remove Guardian Button =============================================
+   824→
+   825→function RemoveGuardianButton({ linkId, studentId, academyId, onRemoved }: {
+   826→  linkId: string; studentId: string; academyId: string; onRemoved: () => void;
+   827→}) {
+   828→  const [confirming, setConfirming] = useState(false);
+   829→  const [submitting, setSubmitting] = useState(false);
+   830→  const [error, setError] = useState<string | null>(null);
+   831→
+   832→  const handleRemove = async () => {
+   833→    setSubmitting(true); setError(null);
+   834→    try {
+   835→      const res = await adminFetch(
+   836→        `/api/admin/students/${studentId}/guardians/${linkId}?academyId=${academyId}`,
+   837→        "DELETE", {},
+   838→      );
+   839→      if (res.ok) { onRemoved(); return; }
+   840→      const data = (await res.json()) as { error?: { message?: string } };
+   841→      setError(data.error?.message ?? `Error ${res.status}`);
+   842→    } catch { setError("Network error"); }
+   843→    finally { setSubmitting(false); }
+   844→  };
+   845→
+   846→  if (confirming) {
+   847→    return (
+   848→      <div className="flex items-center gap-2">
+   849→        {error && <span className="text-xs text-destructive">{error}</span>}
+   850→        <Button variant="destructive" size="sm" disabled={submitting} onClick={handleRemove}>
+   851→          {submitting ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : "Confirm"}
+   852→        </Button>
+   853→        <Button variant="outline" size="sm" onClick={() => { setConfirming(false); setError(null); }}>Cancel</Button>
+   854→      </div>
+   855→    );
+   856→  }
+   857→
+   858→  return (
+   859→    <Button variant="ghost" size="sm" onClick={() => setConfirming(true)}>
+   860→      <Trash2 className="h-4 w-4" aria-hidden />
+   861→    </Button>
+   862→  );
+   863→}
+   864→
+   865→// === Edit Student Dialog ================================================
+   866→
+   867→function EditStudentDialog({ open, onClose, student, academyId, onSaved }: {
+   868→  open: boolean; onClose: () => void; student: StudentDetail; academyId: string; onSaved: () => void;
+   869→}) {
+   870→  const [fullName, setFullName] = useState(student.full_name);
+   871→  const [dateOfBirth, setDateOfBirth] = useState(student.date_of_birth ?? "");
+   872→  const [gender, setGender] = useState(student.gender ?? "");
+   873→  const [notes, setNotes] = useState(student.notes ?? "");
+   874→  const [submitting, setSubmitting] = useState(false);
+   875→  const [error, setError] = useState<string | null>(null);
+   876→
+   877→  const handleSubmit = async () => {
+   878→    if (!fullName.trim()) { setError("Full name is required."); return; }
+   879→    setSubmitting(true); setError(null);
+   880→    try {
+   881→      const body: Record<string, unknown> = { fullName: fullName.trim() };
+   882→      body.dateOfBirth = dateOfBirth || null;
+   883→      body.gender = gender || null;
+   884→      body.notes = notes.trim() || null;
+   885→      const res = await adminFetch(`/api/admin/students/${student.id}?academyId=${academyId}`, "PUT", body);
+   886→      if (res.ok) { onSaved(); return; }
+   887→      const data = (await res.json()) as { error?: { message?: string } };
+   888→      setError(data.error?.message ?? `Error ${res.status}`);
+   889→    } catch { setError("Network error"); }
+   890→    finally { setSubmitting(false); }
+   891→  };
+   892→
+   893→  const handleClose = () => { if (submitting) return; onClose(); };
+   894→
+   895→  return (
+   896→    <Dialog open={open} onOpenChange={(v) => { if (!v) handleClose(); }}>
+   897→      <DialogContent className="sm:max-w-md">
+   898→        <DialogHeader><DialogTitle>Edit Student</DialogTitle></DialogHeader>
+   899→        <div className="space-y-4">
+   900→          <div className="space-y-2">
+   901→            <Label htmlFor="edit-fullName">Full Name *</Label>
+   902→            <Input id="edit-fullName" value={fullName} onChange={(e) => setFullName(e.target.value)} disabled={submitting} />
+   903→          </div>
+   904→          <div className="space-y-2">
+   905→            <Label htmlFor="edit-dob">Date of Birth</Label>
+   906→            <Input id="edit-dob" type="date" value={dateOfBirth} onChange={(e) => setDateOfBirth(e.target.value)} disabled={submitting} />
+   907→          </div>
+   908→          <div className="space-y-2">
+   909→            <Label htmlFor="edit-gender">Gender</Label>
+   910→            <Select value={gender} onValueChange={setGender} disabled={submitting}>
+   911→              <SelectTrigger id="edit-gender"><SelectValue placeholder="Select gender" /></SelectTrigger>
+   912→              <SelectContent>
+   913→                <SelectItem value="male">Male</SelectItem>
+   914→                <SelectItem value="female">Female</SelectItem>
+   915→                <SelectItem value="unspecified">Unspecified</SelectItem>
+   916→              </SelectContent>
+   917→            </Select>
+   918→          </div>
+   919→          <div className="space-y-2">
+   920→            <Label htmlFor="edit-notes">Notes</Label>
+   921→            <Textarea id="edit-notes" value={notes} onChange={(e) => setNotes(e.target.value)} disabled={submitting} rows={2} />
+   922→          </div>
+   923→          {error && (
+   924→            <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 p-3">
+   925→              <AlertCircle className="h-4 w-4 text-destructive flex-shrink-0 mt-0.5" aria-hidden />
+   926→              <p className="text-sm text-destructive">{error}</p>
+   927→            </div>
+   928→          )}
+   929→        </div>
+   930→        <DialogFooter className="gap-2">
+   931→          <Button variant="outline" onClick={handleClose} disabled={submitting}>Cancel</Button>
+   932→          <Button onClick={handleSubmit} disabled={submitting}>
+   933→            {submitting ? <><Loader2 className="h-4 w-4 animate-spin" aria-hidden /> Saving…</> : "Save Changes"}
+   934→          </Button>
+   935→        </DialogFooter>
+   936→      </DialogContent>
+   937→    </Dialog>
+   938→  );
+   939→}
+   940→
+   941→// === Add Guardian Dialog =================================================
+   942→
+   943→function AddGuardianDialog({ open, onClose, studentId, academyId, onAdded }: {
+   944→  open: boolean; onClose: () => void; studentId: string; academyId: string; onAdded: () => void;
+   945→}) {
+   946→  const [guardianUserId, setGuardianUserId] = useState("");
+   947→  const [isPrimary, setIsPrimary] = useState(false);
+   948→  const [relationship, setRelationship] = useState("");
+   949→  const [submitting, setSubmitting] = useState(false);
+   950→  const [error, setError] = useState<string | null>(null);
+   951→
+   952→  useEffect(() => { if (open) { setGuardianUserId(""); setIsPrimary(false); setRelationship(""); setSubmitting(false); setError(null); } }, [open]);
+   953→
+   954→  const handleSubmit = async () => {
+   955→    const trimmed = guardianUserId.trim();
+   956→    if (!trimmed || trimmed.length < 8) { setError("A valid guardian User ID is required."); return; }
+   957→    setSubmitting(true); setError(null);
+   958→    try {
+   959→      const body: Record<string, unknown> = { guardianUserId: trimmed };
+   960→      if (isPrimary) body.isPrimary = true;
+   961→      if (relationship.trim()) body.relationship = relationship.trim();
+   962→      const res = await adminFetch(`/api/admin/students/${studentId}/guardians?academyId=${academyId}`, "POST", body);
+   963→      if (res.status === 201) { onAdded(); return; }
+   964→      const data = (await res.json()) as { error?: { message?: string } };
+   965→      setError(data.error?.message ?? `Error ${res.status}`);
+   966→    } catch { setError("Network error"); }
+   967→    finally { setSubmitting(false); }
+   968→  };
+   969→
+   970→  const handleClose = () => { if (submitting) return; onClose(); };
+   971→
+   972→  return (
+   973→    <Dialog open={open} onOpenChange={(v) => { if (!v) handleClose(); }}>
+   974→      <DialogContent className="sm:max-w-md">
+   975→        <DialogHeader>
+   976→          <DialogTitle>Link Guardian</DialogTitle>
+   977→          <DialogDescription>Link an existing parent/guardian user to this student.</DialogDescription>
+   978→        </DialogHeader>
+   979→        <div className="space-y-4">
+   980→          <div className="space-y-2">
+   981→            <Label htmlFor="guardian-uid">Guardian User ID *</Label>
+   982→            <Input id="guardian-uid" value={guardianUserId} onChange={(e) => setGuardianUserId(e.target.value)} disabled={submitting} placeholder="UUID of the guardian's user account" />
+   983→            <p className="text-xs text-muted-foreground">The user must exist and have a parent role in this academy.</p>
+   984→          </div>
+   985→          <div className="flex items-center gap-2">
+   986→            <input type="checkbox" id="guardian-primary" checked={isPrimary} onChange={(e) => setIsPrimary(e.target.checked)} disabled={submitting} className="h-4 w-4 rounded border-gray-300" />
+   987→            <Label htmlFor="guardian-primary" className="text-sm">Primary guardian</Label>
+   988→          </div>
+   989→          <div className="space-y-2">
+   990→            <Label htmlFor="guardian-relationship">Relationship (optional)</Label>
+   991→            <Input id="guardian-relationship" value={relationship} onChange={(e) => setRelationship(e.target.value)} disabled={submitting} placeholder="e.g., Father, Mother, Aunt…" />
+   992→          </div>
+   993→          {error && (
+   994→            <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 p-3">
+   995→              <AlertCircle className="h-4 w-4 text-destructive flex-shrink-0 mt-0.5" aria-hidden />
+   996→              <p className="text-sm text-destructive">{error}</p>
+   997→            </div>
+   998→          )}
+   999→        </div>
+  1000→        <DialogFooter className="gap-2">
+  1001→          <Button variant="outline" onClick={handleClose} disabled={submitting}>Cancel</Button>
+  1002→          <Button onClick={handleSubmit} disabled={submitting}>
+  1003→            {submitting ? <><Loader2 className="h-4 w-4 animate-spin" aria-hidden /> Linking…</> : "Link Guardian"}
+  1004→          </Button>
+  1005→        </DialogFooter>
+  1006→      </DialogContent>
+  1007→    </Dialog>
+  1008→  );
+  1009→}
+  1010→
+  1011→// === Class Selector (shared by Enroll + Transfer) ========================
+  1012→
+  1013→interface ClassListItem { id: string; name: string; capacity: number; isActive: boolean }
+  1014→
+  1015→function useClasses(academyId: string) {
+  1016→  const [classes, setClasses] = useState<ClassListItem[]>([]);
+  1017→  const [loading, setLoading] = useState(true);
+  1018→  const [error, setError] = useState<string | null>(null);
+  1019→
+  1020→  useEffect(() => {
+  1021→    let cancelled = false;
+  1022→    setLoading(true);
+  1023→    void (async () => {
+  1024→      try {
+  1025→        const res = await fetch(`/api/admin/classes?academyId=${academyId}`, { credentials: "same-origin" });
+  1026→        if (cancelled) return;
+  1027→        if (!res.ok) { setError(`Error ${res.status}`); return; }
+  1028→        const data = (await res.json()) as { classes?: ClassListItem[] };
+  1029→        setClasses(data.classes ?? []);
+  1030→      } catch { if (!cancelled) setError("Network error"); }
+  1031→      finally { if (!cancelled) setLoading(false); }
+  1032→    })();
+  1033→    return () => { cancelled = true; };
+  1034→  }, [academyId]);
+  1035→
+  1036→  return { classes, loading, error };
+  1037→}
+  1038→
+  1039→// === Enroll Dialog =======================================================
+  1040→
+  1041→function EnrollDialog({ open, onClose, studentId, academyId, onEnrolled }: {
+  1042→  open: boolean; onClose: () => void; studentId: string; academyId: string; onEnrolled: () => void;
+  1043→}) {
+  1044→  const { classes, loading, error: classError } = useClasses(academyId);
+  1045→  const [classId, setClassId] = useState("");
+  1046→  const [effectiveFrom, setEffectiveFrom] = useState(new Date().toISOString().split("T")[0]!);
+  1047→  const [submitting, setSubmitting] = useState(false);
+  1048→  const [error, setError] = useState<string | null>(null);
+  1049→
+  1050→  useEffect(() => { if (open) { setClassId(""); setSubmitting(false); setError(null); } }, [open]);
+  1051→
+  1052→  const handleSubmit = async () => {
+  1053→    if (!classId) { setError("Please select a class."); return; }
+  1054→    if (!effectiveFrom) { setError("Effective date is required."); return; }
+  1055→    setSubmitting(true); setError(null);
+  1056→    try {
+  1057→      const res = await adminFetch(`/api/admin/students/${studentId}/enrollments?academyId=${academyId}`, "POST", { classId, effectiveFrom });
+  1058→      if (res.status === 201) { onEnrolled(); return; }
+  1059→      const data = (await res.json()) as { error?: { message?: string } };
+  1060→      setError(data.error?.message ?? `Error ${res.status}`);
+  1061→    } catch { setError("Network error"); }
+  1062→    finally { setSubmitting(false); }
+  1063→  };
+  1064→
+  1065→  const handleClose = () => { if (submitting) return; onClose(); };
+  1066→
+  1067→  return (
+  1068→    <Dialog open={open} onOpenChange={(v) => { if (!v) handleClose(); }}>
+  1069→      <DialogContent className="sm:max-w-md">
+  1070→        <DialogHeader><DialogTitle>Enroll in Class</DialogTitle></DialogHeader>
+  1071→        <div className="space-y-4">
+  1072→          {loading ? (
+  1073→            <div className="flex items-center gap-2 text-sm text-muted-foreground"><Loader2 className="h-4 w-4 animate-spin" aria-hidden /> Loading classes…</div>
+  1074→          ) : classError ? (
+  1075→            <p className="text-sm text-destructive">{classError}</p>
+  1076→          ) : classes.length === 0 ? (
+  1077→            <p className="text-sm text-muted-foreground">No classes available. Create a class first.</p>
+  1078→          ) : (
+  1079→            <div className="space-y-2">
+  1080→              <Label htmlFor="enroll-class">Class *</Label>
+  1081→              <Select value={classId} onValueChange={setClassId} disabled={submitting}>
+  1082→                <SelectTrigger id="enroll-class"><SelectValue placeholder="Select class" /></SelectTrigger>
+  1083→                <SelectContent>
+  1084→                  {classes.map((c) => (
+  1085→                    <SelectItem key={c.id} value={c.id}>{c.name} (cap: {c.capacity}){!c.isActive ? " [inactive]" : ""}</SelectItem>
+  1086→                  ))}
+  1087→                </SelectContent>
+  1088→              </Select>
+  1089→            </div>
+  1090→          )}
+  1091→          <div className="space-y-2">
+  1092→            <Label htmlFor="enroll-date">Effective From *</Label>
+  1093→            <Input id="enroll-date" type="date" value={effectiveFrom} onChange={(e) => setEffectiveFrom(e.target.value)} disabled={submitting} />
+  1094→          </div>
+  1095→          {error && (
+  1096→            <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 p-3">
+  1097→              <AlertCircle className="h-4 w-4 text-destructive flex-shrink-0 mt-0.5" aria-hidden />
+  1098→              <p className="text-sm text-destructive">{error}</p>
+  1099→            </div>
+  1100→          )}
+  1101→        </div>
+  1102→        <DialogFooter className="gap-2">
+  1103→          <Button variant="outline" onClick={handleClose} disabled={submitting}>Cancel</Button>
+  1104→          <Button onClick={handleSubmit} disabled={submitting || !classId}>
+  1105→            {submitting ? <><Loader2 className="h-4 w-4 animate-spin" aria-hidden /> Enrolling…</> : "Enroll"}
+  1106→          </Button>
+  1107→        </DialogFooter>
+  1108→      </DialogContent>
+  1109→    </Dialog>
+  1110→  );
+  1111→}
+  1112→
+  1113→// === Transfer Dialog =====================================================
+  1114→
+  1115→function TransferDialog({ open, onClose, studentId, academyId, currentClassName, onTransferred }: {
+  1116→  open: boolean; onClose: () => void; studentId: string; academyId: string; currentClassName: string; onTransferred: () => void;
+  1117→}) {
+  1118→  const { classes, loading, error: classError } = useClasses(academyId);
+  1119→  const [newClassId, setNewClassId] = useState("");
+  1120→  const [effectiveFrom, setEffectiveFrom] = useState(new Date().toISOString().split("T")[0]!);
+  1121→  const [reason, setReason] = useState("");
+  1122→  const [submitting, setSubmitting] = useState(false);
+  1123→  const [error, setError] = useState<string | null>(null);
+  1124→
+  1125→  useEffect(() => { if (open) { setNewClassId(""); setReason(""); setSubmitting(false); setError(null); } }, [open]);
+  1126→
+  1127→  const handleSubmit = async () => {
+  1128→    if (!newClassId) { setError("Please select a new class."); return; }
+  1129→    setSubmitting(true); setError(null);
+  1130→    try {
+  1131→      const body: Record<string, unknown> = { newClassId, effectiveFrom };
+  1132→      if (reason.trim()) body.reason = reason.trim();
+  1133→      const res = await adminFetch(`/api/admin/students/${studentId}/transfer?academyId=${academyId}`, "POST", body);
+  1134→      if (res.ok) { onTransferred(); return; }
+  1135→      const data = (await res.json()) as { error?: { message?: string } };
+  1136→      setError(data.error?.message ?? `Error ${res.status}`);
+  1137→    } catch { setError("Network error"); }
+  1138→    finally { setSubmitting(false); }
+  1139→  };
+  1140→
+  1141→  const handleClose = () => { if (submitting) return; onClose(); };
+  1142→
+  1143→  return (
+  1144→    <Dialog open={open} onOpenChange={(v) => { if (!v) handleClose(); }}>
+  1145→      <DialogContent className="sm:max-w-md">
+  1146→        <DialogHeader>
+  1147→          <DialogTitle>Transfer Class</DialogTitle>
+  1148→          <DialogDescription>Transfer from <strong>{currentClassName}</strong> to a new class.</DialogDescription>
+  1149→        </DialogHeader>
+  1150→        <div className="space-y-4">
+  1151→          {loading ? (
+  1152→            <div className="flex items-center gap-2 text-sm text-muted-foreground"><Loader2 className="h-4 w-4 animate-spin" aria-hidden /> Loading classes…</div>
+  1153→          ) : classError ? (
+  1154→            <p className="text-sm text-destructive">{classError}</p>
+  1155→          ) : (
+  1156→            <div className="space-y-2">
+  1157→              <Label htmlFor="transfer-class">New Class *</Label>
+  1158→              <Select value={newClassId} onValueChange={setNewClassId} disabled={submitting}>
+  1159→                <SelectTrigger id="transfer-class"><SelectValue placeholder="Select new class" /></SelectTrigger>
+  1160→                <SelectContent>
+  1161→                  {classes.map((c) => (
+  1162→                    <SelectItem key={c.id} value={c.id}>{c.name} (cap: {c.capacity})</SelectItem>
+  1163→                  ))}
+  1164→                </SelectContent>
+  1165→              </Select>
+  1166→            </div>
+  1167→          )}
+  1168→          <div className="space-y-2">
+  1169→            <Label htmlFor="transfer-date">Effective From *</Label>
+  1170→            <Input id="transfer-date" type="date" value={effectiveFrom} onChange={(e) => setEffectiveFrom(e.target.value)} disabled={submitting} />
+  1171→          </div>
+  1172→          <div className="space-y-2">
+  1173→            <Label htmlFor="transfer-reason">Reason (optional)</Label>
+  1174→            <Input id="transfer-reason" value={reason} onChange={(e) => setReason(e.target.value)} disabled={submitting} placeholder="e.g., Moved to advanced group" />
+  1175→          </div>
+  1176→          {error && (
+  1177→            <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 p-3">
+  1178→              <AlertCircle className="h-4 w-4 text-destructive flex-shrink-0 mt-0.5" aria-hidden />
+  1179→              <p className="text-sm text-destructive">{error}</p>
+  1180→            </div>
+  1181→          )}
+  1182→        </div>
+  1183→        <DialogFooter className="gap-2">
+  1184→          <Button variant="outline" onClick={handleClose} disabled={submitting}>Cancel</Button>
+  1185→          <Button onClick={handleSubmit} disabled={submitting || !newClassId}>
+  1186→            {submitting ? <><Loader2 className="h-4 w-4 animate-spin" aria-hidden /> Transferring…</> : "Transfer"}
+  1187→          </Button>
+  1188→        </DialogFooter>
+  1189→      </DialogContent>
+  1190→    </Dialog>
+  1191→  );
+  1192→}
+  1193→
+  1194→// === Class Management ====================================================
+  1195→
+  1196→interface ClassRow {
+  1197→  id: string;
+  1198→  name: string;
+  1199→  capacity: number;
+  1200→  isActive: boolean;
+  1201→}
+  1202→
+  1203→type ClassListState =
+  1204→  | { status: "loading" }
+  1205→  | { status: "success"; data: ClassRow[] }
+  1206→  | { status: "error"; message: string };
+  1207→
+  1208→function ClassManagement({ academyId }: { academyId: string }) {
+  1209→  const [state, setState] = useState<ClassListState>({ status: "loading" });
+  1210→  const [showCreate, setShowCreate] = useState(false);
+  1211→  const [editClass, setEditClass] = useState<ClassRow | null>(null);
+  1212→  const [selectedClassId, setSelectedClassId] = useState<string | null>(null);
+  1213→
+  1214→  const academyIdRef = useRef(academyId);
+  1215→  useEffect(() => { academyIdRef.current = academyId; }, [academyId]);
+  1216→
+  1217→  const fetchList = useCallback(async () => {
+  1218→    const aid = academyId;
+  1219→    setState({ status: "loading" });
+  1220→    try {
+  1221→      const res = await fetch(`/api/admin/classes?academyId=${aid}`, { credentials: "same-origin" });
+  1222→      const data = (await res.json()) as { classes?: ClassRow[]; error?: { message?: string } };
+  1223→      if (aid !== academyIdRef.current) return;
+  1224→      if (!res.ok || !data.classes) {
+  1225→        setState({ status: "error", message: data.error?.message ?? `Error ${res.status}` });
+  1226→        return;
+  1227→      }
+  1228→      setState({ status: "success", data: data.classes });
+  1229→    } catch {
+  1230→      if (aid !== academyIdRef.current) return;
+  1231→      setState({ status: "error", message: "Network error" });
+  1232→    }
+  1233→  }, [academyId]);
+  1234→
+  1235→  useEffect(() => {
+  1236→    if (!academyId) return;
+  1237→    let cancelled = false;
+  1238→    void (async () => {
+  1239→      try {
+  1240→        const res = await fetch(`/api/admin/classes?academyId=${academyId}`, { credentials: "same-origin" });
+  1241→        if (cancelled) return;
+  1242→        const data = (await res.json()) as { classes?: ClassRow[]; error?: { message?: string } };
+  1243→        if (cancelled) return;
+  1244→        if (!res.ok || !data.classes) {
+  1245→          setState({ status: "error", message: data.error?.message ?? `Error ${res.status}` });
+  1246→          return;
+  1247→        }
+  1248→        setState({ status: "success", data: data.classes });
+  1249→      } catch {
+  1250→        if (cancelled) return;
+  1251→        setState({ status: "error", message: "Network error" });
+  1252→      }
+  1253→    })();
+  1254→    return () => { cancelled = true; };
+  1255→  }, [academyId]);
+  1256→
+  1257→  if (selectedClassId) {
+  1258→    return (
+  1259→      <ClassDetail
+  1260→        classId={selectedClassId}
+  1261→        academyId={academyId}
+  1262→        onBack={() => { setSelectedClassId(null); fetchList(); }}
+  1263→      />
+  1264→    );
+  1265→  }
+  1266→
+  1267→  return (
+  1268→    <div className="space-y-4">
+  1269→      <div className="flex items-center justify-between">
+  1270→        <h3 className="text-sm font-medium text-muted-foreground">Classes</h3>
+  1271→        <Button className="gap-2" onClick={() => setShowCreate(true)}>
+  1272→          <UserPlus className="h-4 w-4" aria-hidden /> Add Class
+  1273→        </Button>
+  1274→      </div>
+  1275→
+  1276→      {state.status === "loading" && (
+  1277→        <Card><CardContent className="flex items-center gap-3 p-6">
+  1278→          <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" aria-hidden />
+  1279→          <p className="text-sm text-muted-foreground">Loading classes…</p>
+  1280→        </CardContent></Card>
+  1281→      )}
+  1282→
+  1283→      {state.status === "error" && (
+  1284→        <Card className="border-destructive/30">
+  1285→          <CardContent className="p-6">
+  1286→            <div className="flex items-start gap-3">
+  1287→              <AlertCircle className="h-5 w-5 text-destructive flex-shrink-0 mt-0.5" aria-hidden />
+  1288→              <div>
+  1289→                <p className="text-sm font-medium text-destructive">Failed to load classes</p>
+  1290→                <p className="mt-1 text-sm text-muted-foreground">{state.message}</p>
+  1291→                <Button variant="outline" size="sm" className="mt-3 gap-2" onClick={fetchList}>
+  1292→                  <RefreshCw className="h-4 w-4" aria-hidden /> Retry
+  1293→                </Button>
+  1294→              </div>
+  1295→            </div>
+  1296→          </CardContent>
+  1297→        </Card>
+  1298→      )}
+  1299→
+  1300→      {state.status === "success" && (
+  1301→        <>
+  1302→          {state.data.length === 0 ? (
+  1303→            <Card><CardContent className="p-8 text-center">
+  1304→              <CalendarDays className="mx-auto h-8 w-8 text-muted-foreground" aria-hidden />
+  1305→              <p className="mt-3 text-sm font-medium">No classes</p>
+  1306→              <p className="mt-1 text-sm text-muted-foreground">Click &ldquo;Add Class&rdquo; to create the first class.</p>
+  1307→            </CardContent></Card>
+  1308→          ) : (
+  1309→            <div className="space-y-2">
+  1310→              {state.data.map((c) => (
+  1311→                <Card key={c.id} className="cursor-pointer hover:border-primary/50 transition-colors" onClick={() => setSelectedClassId(c.id)}>
+  1312→                  <CardContent className="flex items-center justify-between p-4">
+  1313→                    <div>
+  1314→                      <p className="font-medium">{c.name}</p>
+  1315→                      <p className="text-sm text-muted-foreground">Capacity: {c.capacity}</p>
+  1316→                    </div>
+  1317→                    <div className="flex items-center gap-2">
+  1318→                      {!c.isActive && <Badge variant="outline">Inactive</Badge>}
+  1319→                      <Button variant="ghost" size="sm" onClick={(e) => { e.stopPropagation(); setEditClass(c); }}><Pencil className="h-4 w-4" aria-hidden /></Button>
+  1320→                    </div>
+  1321→                  </CardContent>
+  1322→                </Card>
+  1323→              ))}
+  1324→            </div>
+  1325→          )}
+  1326→        </>
+  1327→      )}
+  1328→
+  1329→      {showCreate && (
+  1330→        <CreateClassDialog
+  1331→          open={showCreate}
+  1332→          onClose={() => setShowCreate(false)}
+  1333→          academyId={academyId}
+  1334→          onCreated={() => { setShowCreate(false); fetchList(); }}
+  1335→        />
+  1336→      )}
+  1337→      {editClass && (
+  1338→        <EditClassDialog
+  1339→          open={editClass !== null}
+  1340→          onClose={() => setEditClass(null)}
+  1341→          classRow={editClass}
+  1342→          academyId={academyId}
+  1343→          onSaved={() => { setEditClass(null); fetchList(); }}
+  1344→        />
+  1345→      )}
+  1346→    </div>
+  1347→  );
+  1348→}
+  1349→
+  1350→// === Class Detail (with schedule versions, slots, occurrences) =========
+  1351→
+  1352→interface ScheduleVersion {
+  1353→  id: string;
+  1354→  effectiveFrom: string;
+  1355→  effectiveTo: string | null;
+  1356→  status: string;
+  1357→}
+  1358→
+  1359→interface SlotRow {
+  1360→  id: string;
+  1361→  weekday: number;
+  1362→  startTime: string;
+  1363→  endTime: string;
+  1364→  capacityOverride: number | null;
+  1365→}
+  1366→
+  1367→interface OccurrenceRow {
+  1368→  id: string;
+  1369→  occurrenceDate: string;
+  1370→  startAt: string;
+  1371→  endAt: string;
+  1372→  status: string;
+  1373→  capacity: number;
+  1374→  cancelledReason: string | null;
+  1375→}
+  1376→
+  1377→const WEEKDAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+  1378→
+  1379→function ClassDetail({ classId, academyId, onBack }: {
+  1380→  classId: string; academyId: string; onBack: () => void;
+  1381→}) {
+  1382→  const [className, setClassName] = useState("Loading…");
+  1383→  const [versions, setVersions] = useState<ScheduleVersion[]>([]);
+  1384→  const [slots, setSlots] = useState<SlotRow[]>([]);
+  1385→  const [occurrences, setOccurrences] = useState<OccurrenceRow[]>([]);
+  1386→  const [showCreateVersion, setShowCreateVersion] = useState(false);
+  1387→  const [showAddSlot, setShowAddSlot] = useState(false);
+  1388→  const [showGenerate, setShowGenerate] = useState(false);
+  1389→  const [loading, setLoading] = useState(true);
+  1390→  const [error, setError] = useState<string | null>(null);
+  1391→  const [genResult, setGenResult] = useState<string | null>(null);
+  1392→
+  1393→  const refetch = useCallback(async () => {
+  1394→    let cancelled = false;
+  1395→    setLoading(true);
+  1396→    setError(null);
+  1397→    try {
+  1398→      const [classRes, versionRes, occRes] = await Promise.all([
+  1399→        fetch(`/api/admin/classes/${classId}?academyId=${academyId}`, { credentials: "same-origin" }),
+  1400→        fetch(`/api/admin/classes/${classId}/schedule-versions?academyId=${academyId}`, { credentials: "same-origin" }),
+  1401→        fetch(`/api/admin/classes/${classId}/occurrences?academyId=${academyId}`, { credentials: "same-origin" }),
+  1402→      ]);
+  1403→      if (cancelled) return;
+  1404→      if (!classRes.ok) { setError("Failed to load class"); return; }
+  1405→      const classData = (await classRes.json()) as { name?: string };
+  1406→      if (cancelled) return;
+  1407→      setClassName(classData.name ?? "Unknown");
+  1408→      const versionData = versionRes.ok ? ((await versionRes.json()) as { versions?: ScheduleVersion[] }).versions ?? [] : [];
+  1409→      setVersions(versionData);
+  1410→      const activeVersion = versionData.find((v) => v.status === "active");
+  1411→      if (activeVersion) {
+  1412→        const slotsRes = await fetch(`/api/admin/schedule-versions/${activeVersion.id}/slots?academyId=${academyId}`, { credentials: "same-origin" });
+  1413→        if (slotsRes.ok) {
+  1414→          const slotsData = (await slotsRes.json()) as { slots?: SlotRow[] };
+  1415→          if (!cancelled) setSlots(slotsData.slots ?? []);
+  1416→        }
+  1417→      } else {
+  1418→        setSlots([]);
+  1419→      }
+  1420→      const occData = occRes.ok ? ((await occRes.json()) as { occurrences?: OccurrenceRow[] }).occurrences ?? [] : [];
+  1421→      if (!cancelled) setOccurrences(occData);
+  1422→    } catch { if (!cancelled) setError("Network error"); }
+  1423→    finally { if (!cancelled) setLoading(false); }
+  1424→    return () => { cancelled = true; };
+  1425→  }, [classId, academyId]);
+  1426→
+  1427→  useEffect(() => { void refetch(); }, [refetch]);
+  1428→
+  1429→  if (loading) {
+  1430→    return <Card><CardContent className="flex items-center gap-3 p-6"><Loader2 className="h-5 w-5 animate-spin text-muted-foreground" aria-hidden /><p className="text-sm text-muted-foreground">Loading class…</p></CardContent></Card>;
+  1431→  }
+  1432→  if (error) {
+  1433→    return <Card className="border-destructive/30"><CardContent className="p-6"><div className="flex items-start gap-3"><AlertCircle className="h-5 w-5 text-destructive flex-shrink-0 mt-0.5" aria-hidden /><div><p className="text-sm font-medium text-destructive">{error}</p><Button variant="outline" size="sm" className="mt-3 gap-2" onClick={onBack}><ArrowLeft className="h-4 w-4" aria-hidden /> Back</Button></div></div></CardContent></Card>;
+  1434→  }
+  1435→
+  1436→  const activeVersion = versions.find((v) => v.status === "active");
+  1437→
+  1438→  return (
+  1439→    <div className="space-y-4">
+  1440→      <div className="flex items-center gap-3">
+  1441→        <Button variant="ghost" size="sm" onClick={onBack} className="gap-2"><ArrowLeft className="h-4 w-4" aria-hidden /> Back</Button>
+  1442→        <h2 className="text-lg font-semibold">{className}</h2>
+  1443→      </div>
+  1444→
+  1445→      {/* Schedule Versions */}
+  1446→      <Card>
+  1447→        <CardHeader className="flex-row items-center justify-between">
+  1448→          <CardTitle className="text-base">Schedule Versions</CardTitle>
+  1449→          <Button variant="outline" size="sm" className="gap-2" onClick={() => setShowCreateVersion(true)}>
+  1450→            <UserPlus className="h-4 w-4" aria-hidden /> New Version
+  1451→          </Button>
+  1452→        </CardHeader>
+  1453→        <CardContent>
+  1454→          {versions.length === 0 ? (
+  1455→            <p className="text-sm text-muted-foreground">No schedule versions. Create one to define training days and times.</p>
+  1456→          ) : (
+  1457→            <div className="space-y-2">
+  1458→              {versions.map((v) => (
+  1459→                <div key={v.id} className="flex items-center justify-between rounded-lg border p-3 text-sm">
+  1460→                  <div>
+  1461→                    <p className="font-medium">From: {v.effectiveFrom}{v.effectiveTo ? ` → To: ${v.effectiveTo}` : ""}</p>
+  1462→                    <p className="text-muted-foreground">Status: {v.status}</p>
+  1463→                  </div>
+  1464→                  {v.status === "active" && <Badge>Active</Badge>}
+  1465→                  {v.status === "superseded" && <Badge variant="outline">Superseded</Badge>}
+  1466→                </div>
+  1467→              ))}
+  1468→            </div>
+  1469→          )}
+  1470→        </CardContent>
+  1471→      </Card>
+  1472→
+  1473→      {/* Slots (for active version) */}
+  1474→      {activeVersion && (
+  1475→        <Card>
+  1476→          <CardHeader className="flex-row items-center justify-between">
+  1477→            <CardTitle className="text-base">Training Slots</CardTitle>
+  1478→            <Button variant="outline" size="sm" className="gap-2" onClick={() => setShowAddSlot(true)}>
+  1479→              <UserPlus className="h-4 w-4" aria-hidden /> Add Slot
+  1480→            </Button>
+  1481→          </CardHeader>
+  1482→          <CardContent>
+  1483→            {slots.length === 0 ? (
+  1484→              <p className="text-sm text-muted-foreground">No slots defined. Add a training slot (e.g., Tuesday 15:00-16:00).</p>
+  1485→            ) : (
+  1486→              <div className="space-y-2">
+  1487→                {slots.map((s) => (
+  1488→                  <div key={s.id} className="flex items-center justify-between rounded-lg border p-3 text-sm">
+  1489→                    <div>
+  1490→                      <p className="font-medium">{WEEKDAY_NAMES[s.weekday]} {s.startTime}–{s.endTime}</p>
+  1491→                      {s.capacityOverride && <p className="text-muted-foreground">Capacity override: {s.capacityOverride}</p>}
+  1492→                    </div>
+  1493→                    <DeleteSlotButton slotId={s.id} academyId={academyId} onDeleted={refetch} />
+  1494→                  </div>
+  1495→                ))}
+  1496→              </div>
+  1497→            )}
+  1498→          </CardContent>
+  1499→        </Card>
+  1500→      )}
+  1501→
+  1502→      {/* Occurrence Generation */}
+  1503→      {activeVersion && slots.length > 0 && (
+  1504→        <Card>
+  1505→          <CardHeader className="flex-row items-center justify-between">
+  1506→            <CardTitle className="text-base">Training Occurrences</CardTitle>
+  1507→            <Button variant="outline" size="sm" className="gap-2" onClick={() => setShowGenerate(true)}>
+  1508→              <CalendarDays className="h-4 w-4" aria-hidden /> Generate
+  1509→            </Button>
+  1510→          </CardHeader>
+  1511→          <CardContent>
+  1512→            {genResult && <p className="text-sm text-emerald-600 mb-3">{genResult}</p>}
+  1513→            {occurrences.length === 0 ? (
+  1514→              <p className="text-sm text-muted-foreground">No occurrences generated yet.</p>
+  1515→            ) : (
+  1516→              <div className="max-h-96 overflow-y-auto space-y-1.5">
+  1517→                {occurrences.slice(0, 50).map((o) => (
+  1518→                  <div key={o.id} className="flex items-center justify-between rounded border p-2 text-sm">
+  1519→                    <span>{o.occurrenceDate}</span>
+  1520→                    <div className="flex items-center gap-2">
+  1521→                      {o.status === "cancelled" && <Badge variant="destructive">Cancelled</Badge>}
+  1522→                      {o.status === "planned" && <Badge variant="secondary">Planned</Badge>}
+  1523→                      {o.status === "completed" && <Badge>Completed</Badge>}
+  1524→                      <span className="text-muted-foreground text-xs">{o.capacity} cap</span>
+  1525→                    </div>
+  1526→                  </div>
+  1527→                ))}
+  1528→                {occurrences.length > 50 && <p className="text-xs text-muted-foreground">Showing 50 of {occurrences.length}</p>}
+  1529→              </div>
+  1530→            )}
+  1531→          </CardContent>
+  1532→        </Card>
+  1533→      )}
+  1534→
+  1535→      {/* Dialogs */}
+  1536→      {showCreateVersion && (
+  1537→        <CreateVersionDialog open={showCreateVersion} onClose={() => setShowCreateVersion(false)} classId={classId} academyId={academyId} onCreated={() => { setShowCreateVersion(false); refetch(); }} />
+  1538→      )}
+  1539→      {showAddSlot && activeVersion && (
+  1540→        <AddSlotDialog open={showAddSlot} onClose={() => setShowAddSlot(false)} versionId={activeVersion.id} academyId={academyId} onAdded={() => { setShowAddSlot(false); refetch(); }} />
+  1541→      )}
+  1542→      {showGenerate && (
+  1543→        <GenerateDialog open={showGenerate} onClose={() => setShowGenerate(false)} classId={classId} academyId={academyId} onGenerated={(msg) => { setShowGenerate(false); setGenResult(msg); refetch(); }} />
+  1544→      )}
+  1545→    </div>
+  1546→  );
+  1547→}
+  1548→
+  1549→// === Delete Slot Button =================================================
+  1550→
+  1551→function DeleteSlotButton({ slotId, academyId, onDeleted }: { slotId: string; academyId: string; onDeleted: () => void }) {
+  1552→  const [confirming, setConfirming] = useState(false);
+  1553→  const [submitting, setSubmitting] = useState(false);
+  1554→  const [error, setError] = useState<string | null>(null);
+  1555→
+  1556→  const handleDelete = async () => {
+  1557→    setSubmitting(true); setError(null);
+  1558→    try {
+  1559→      const res = await adminFetch(`/api/admin/schedule-slots/${slotId}?academyId=${academyId}`, "DELETE", {});
+  1560→      if (res.ok) { onDeleted(); return; }
+  1561→      const data = (await res.json()) as { error?: { message?: string } };
+  1562→      setError(data.error?.message ?? `Error ${res.status}`);
+  1563→    } catch { setError("Network error"); }
+  1564→    finally { setSubmitting(false); }
+  1565→  };
+  1566→
+  1567→  if (confirming) {
+  1568→    return (
+  1569→      <div className="flex items-center gap-2">
+  1570→        {error && <span className="text-xs text-destructive">{error}</span>}
+  1571→        <Button variant="destructive" size="sm" disabled={submitting} onClick={handleDelete}>{submitting ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : "Confirm"}</Button>
+  1572→        <Button variant="outline" size="sm" onClick={() => { setConfirming(false); setError(null); }}>Cancel</Button>
+  1573→      </div>
+  1574→    );
+  1575→  }
+  1576→  return <Button variant="ghost" size="sm" onClick={() => setConfirming(true)}><Trash2 className="h-4 w-4" aria-hidden /></Button>;
+  1577→}
+  1578→
+  1579→// === Create Version Dialog =============================================
+  1580→
+  1581→function CreateVersionDialog({ open, onClose, classId, academyId, onCreated }: {
+  1582→  open: boolean; onClose: () => void; classId: string; academyId: string; onCreated: () => void;
+  1583→}) {
+  1584→  const [effectiveFrom, setEffectiveFrom] = useState(new Date().toISOString().split("T")[0]!);
+  1585→  const [submitting, setSubmitting] = useState(false);
+  1586→  const [error, setError] = useState<string | null>(null);
+  1587→
+  1588→  useEffect(() => { if (open) { setSubmitting(false); setError(null); } }, [open]);
+  1589→
+  1590→  const handleSubmit = async () => {
+  1591→    if (!effectiveFrom) { setError("Effective date is required."); return; }
+  1592→    setSubmitting(true); setError(null);
+  1593→    try {
+  1594→      const res = await adminFetch(`/api/admin/classes/${classId}/schedule-versions?academyId=${academyId}`, "POST", { effectiveFrom });
+  1595→      if (res.status === 201) { onCreated(); return; }
+  1596→      const data = (await res.json()) as { error?: { message?: string } };
+  1597→      setError(data.error?.message ?? `Error ${res.status}`);
+  1598→    } catch { setError("Network error"); }
+  1599→    finally { setSubmitting(false); }
+  1600→  };
+  1601→
+  1602→  const handleClose = () => { if (submitting) return; onClose(); };
+  1603→
+  1604→  return (
+  1605→    <Dialog open={open} onOpenChange={(v) => { if (!v) handleClose(); }}>
+  1606→      <DialogContent className="sm:max-w-md">
+  1607→        <DialogHeader><DialogTitle>New Schedule Version</DialogTitle><DialogDescription>This will supersede any existing active version.</DialogDescription></DialogHeader>
+  1608→        <div className="space-y-4">
+  1609→          <div className="space-y-2">
+  1610→            <Label htmlFor="version-date">Effective From *</Label>
+  1611→            <Input id="version-date" type="date" value={effectiveFrom} onChange={(e) => setEffectiveFrom(e.target.value)} disabled={submitting} />
+  1612→          </div>
+  1613→          {error && <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 p-3"><AlertCircle className="h-4 w-4 text-destructive flex-shrink-0 mt-0.5" aria-hidden /><p className="text-sm text-destructive">{error}</p></div>}
+  1614→        </div>
+  1615→        <DialogFooter className="gap-2">
+  1616→          <Button variant="outline" onClick={handleClose} disabled={submitting}>Cancel</Button>
+  1617→          <Button onClick={handleSubmit} disabled={submitting}>{submitting ? <><Loader2 className="h-4 w-4 animate-spin" aria-hidden /> Creating…</> : "Create Version"}</Button>
+  1618→        </DialogFooter>
+  1619→      </DialogContent>
+  1620→    </Dialog>
+  1621→  );
+  1622→}
+  1623→
+  1624→// === Add Slot Dialog ===================================================
+  1625→
+  1626→function AddSlotDialog({ open, onClose, versionId, academyId, onAdded }: {
+  1627→  open: boolean; onClose: () => void; versionId: string; academyId: string; onAdded: () => void;
+  1628→}) {
+  1629→  const [weekday, setWeekday] = useState("2");
+  1630→  const [startTime, setStartTime] = useState("15:00");
+  1631→  const [endTime, setEndTime] = useState("16:00");
+  1632→  const [capacityOverride, setCapacityOverride] = useState("");
+  1633→  const [submitting, setSubmitting] = useState(false);
+  1634→  const [error, setError] = useState<string | null>(null);
+  1635→
+  1636→  useEffect(() => { if (open) { setSubmitting(false); setError(null); } }, [open]);
+  1637→
+  1638→  const handleSubmit = async () => {
+  1639→    if (startTime >= endTime) { setError("End time must be after start time."); return; }
+  1640→    setSubmitting(true); setError(null);
+  1641→    try {
+  1642→      const body: Record<string, unknown> = { weekday: parseInt(weekday, 10), startTime, endTime };
+  1643→      if (capacityOverride) { const n = parseInt(capacityOverride, 10); if (n > 0) body.capacityOverride = n; }
+  1644→      const res = await adminFetch(`/api/admin/schedule-versions/${versionId}/slots?academyId=${academyId}`, "POST", body);
+  1645→      if (res.status === 201) { onAdded(); return; }
+  1646→      const data = (await res.json()) as { error?: { message?: string } };
+  1647→      setError(data.error?.message ?? `Error ${res.status}`);
+  1648→    } catch { setError("Network error"); }
+  1649→    finally { setSubmitting(false); }
+  1650→  };
+  1651→
+  1652→  const handleClose = () => { if (submitting) return; onClose(); };
+  1653→
+  1654→  return (
+  1655→    <Dialog open={open} onOpenChange={(v) => { if (!v) handleClose(); }}>
+  1656→      <DialogContent className="sm:max-w-md">
+  1657→        <DialogHeader><DialogTitle>Add Training Slot</DialogTitle><DialogDescription>Define a recurring training day and time.</DialogDescription></DialogHeader>
+  1658→        <div className="space-y-4">
+  1659→          <div className="space-y-2">
+  1660→            <Label htmlFor="slot-weekday">Weekday *</Label>
+  1661→            <Select value={weekday} onValueChange={setWeekday} disabled={submitting}>
+  1662→              <SelectTrigger id="slot-weekday"><SelectValue /></SelectTrigger>
+  1663→              <SelectContent>
+  1664→                {WEEKDAY_NAMES.map((name, i) => (<SelectItem key={i} value={String(i)}>{name}</SelectItem>))}
+  1665→              </SelectContent>
+  1666→            </Select>
+  1667→          </div>
+  1668→          <div className="grid grid-cols-2 gap-4">
+  1669→            <div className="space-y-2"><Label htmlFor="slot-start">Start Time *</Label><Input id="slot-start" type="time" value={startTime} onChange={(e) => setStartTime(e.target.value)} disabled={submitting} /></div>
+  1670→            <div className="space-y-2"><Label htmlFor="slot-end">End Time *</Label><Input id="slot-end" type="time" value={endTime} onChange={(e) => setEndTime(e.target.value)} disabled={submitting} /></div>
+  1671→          </div>
+  1672→          <div className="space-y-2">
+  1673→            <Label htmlFor="slot-capacity">Capacity Override (optional)</Label>
+  1674→            <Input id="slot-capacity" type="number" value={capacityOverride} onChange={(e) => setCapacityOverride(e.target.value)} disabled={submitting} placeholder="Use class default" />
+  1675→          </div>
+  1676→          {error && <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 p-3"><AlertCircle className="h-4 w-4 text-destructive flex-shrink-0 mt-0.5" aria-hidden /><p className="text-sm text-destructive">{error}</p></div>}
+  1677→        </div>
+  1678→        <DialogFooter className="gap-2">
+  1679→          <Button variant="outline" onClick={handleClose} disabled={submitting}>Cancel</Button>
+  1680→          <Button onClick={handleSubmit} disabled={submitting}>{submitting ? <><Loader2 className="h-4 w-4 animate-spin" aria-hidden /> Adding…</> : "Add Slot"}</Button>
+  1681→        </DialogFooter>
+  1682→      </DialogContent>
+  1683→    </Dialog>
+  1684→  );
+  1685→}
+  1686→
+  1687→// === Generate Occurrences Dialog ======================================
+  1688→
+  1689→function GenerateDialog({ open, onClose, classId, academyId, onGenerated }: {
+  1690→  open: boolean; onClose: () => void; classId: string; academyId: string; onGenerated: (msg: string) => void;
+  1691→}) {
+  1692→  const [weeksAhead, setWeeksAhead] = useState("16");
+  1693→  const [submitting, setSubmitting] = useState(false);
+  1694→  const [error, setError] = useState<string | null>(null);
+  1695→
+  1696→  useEffect(() => { if (open) { setSubmitting(false); setError(null); } }, [open]);
+  1697→
+  1698→  const handleSubmit = async () => {
+  1699→    const weeks = parseInt(weeksAhead, 10);
+  1700→    if (!weeks || weeks < 1 || weeks > 52) { setError("Weeks must be 1-52."); return; }
+  1701→    setSubmitting(true); setError(null);
+  1702→    try {
+  1703→      const res = await adminFetch(`/api/admin/classes/${classId}/generate-occurrences?academyId=${academyId}`, "POST", { weeksAhead: weeks });
+  1704→      if (res.ok) {
+  1705→        const data = (await res.json()) as { generated: number; idempotent: boolean };
+  1706→        onGenerated(`Generated ${data.generated} new occurrence(s).${data.idempotent ? " All already existed." : ""}`);
+  1707→        return;
+  1708→      }
+  1709→      const data = (await res.json()) as { error?: { message?: string } };
+  1710→      setError(data.error?.message ?? `Error ${res.status}`);
+  1711→    } catch { setError("Network error"); }
+  1712→    finally { setSubmitting(false); }
+  1713→  };
+  1714→
+  1715→  const handleClose = () => { if (submitting) return; onClose(); };
+  1716→
+  1717→  return (
+  1718→    <Dialog open={open} onOpenChange={(v) => { if (!v) handleClose(); }}>
+  1719→      <DialogContent className="sm:max-w-md">
+  1720→        <DialogHeader><DialogTitle>Generate Occurrences</DialogTitle><DialogDescription>Generate future training sessions from the active schedule version.</DialogDescription></DialogHeader>
+  1721→        <div className="space-y-4">
+  1722→          <div className="space-y-2">
+  1723→            <Label htmlFor="gen-weeks">Weeks Ahead *</Label>
+  1724→            <Input id="gen-weeks" type="number" value={weeksAhead} onChange={(e) => setWeeksAhead(e.target.value)} disabled={submitting} min={1} max={52} />
+  1725→            <p className="text-xs text-muted-foreground">1-52 weeks. Generation is idempotent — running twice creates no duplicates.</p>
+  1726→          </div>
+  1727→          {error && <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 p-3"><AlertCircle className="h-4 w-4 text-destructive flex-shrink-0 mt-0.5" aria-hidden /><p className="text-sm text-destructive">{error}</p></div>}
+  1728→        </div>
+  1729→        <DialogFooter className="gap-2">
+  1730→          <Button variant="outline" onClick={handleClose} disabled={submitting}>Cancel</Button>
+  1731→          <Button onClick={handleSubmit} disabled={submitting}>{submitting ? <><Loader2 className="h-4 w-4 animate-spin" aria-hidden /> Generating…</> : "Generate"}</Button>
+  1732→        </DialogFooter>
+  1733→      </DialogContent>
+  1734→    </Dialog>
+  1735→  );
+  1736→}
+  1737→
+  1738→// === Create Class Dialog ================================================
+  1739→
+  1740→function CreateClassDialog({ open, onClose, academyId, onCreated }: {
+  1741→  open: boolean; onClose: () => void; academyId: string; onCreated: () => void;
+  1742→}) {
+  1743→  const [name, setName] = useState("");
+  1744→  const [capacity, setCapacity] = useState("");
+  1745→  const [submitting, setSubmitting] = useState(false);
+  1746→  const [error, setError] = useState<string | null>(null);
+  1747→
+  1748→  useEffect(() => { if (open) { setName(""); setCapacity(""); setSubmitting(false); setError(null); } }, [open]);
+  1749→
+  1750→  const handleSubmit = async () => {
+  1751→    if (!name.trim()) { setError("Class name is required."); return; }
+  1752→    setSubmitting(true); setError(null);
+  1753→    try {
+  1754→      const body: Record<string, unknown> = { name: name.trim() };
+  1755→      if (capacity) { const n = parseInt(capacity, 10); if (n > 0) body.capacity = n; }
+  1756→      const res = await adminFetch(`/api/admin/classes?academyId=${academyId}`, "POST", body);
+  1757→      if (res.status === 201) { onCreated(); return; }
+  1758→      const data = (await res.json()) as { error?: { message?: string } };
+  1759→      setError(data.error?.message ?? `Error ${res.status}`);
+  1760→    } catch { setError("Network error"); }
+  1761→    finally { setSubmitting(false); }
+  1762→  };
+  1763→
+  1764→  const handleClose = () => { if (submitting) return; onClose(); };
+  1765→
+  1766→  return (
+  1767→    <Dialog open={open} onOpenChange={(v) => { if (!v) handleClose(); }}>
+  1768→      <DialogContent className="sm:max-w-md">
+  1769→        <DialogHeader>
+  1770→          <DialogTitle>Add New Class</DialogTitle>
+  1771→          <DialogDescription>Create a new training class in this academy.</DialogDescription>
+  1772→        </DialogHeader>
+  1773→        <div className="space-y-4">
+  1774→          <div className="space-y-2">
+  1775→            <Label htmlFor="create-class-name">Class Name *</Label>
+  1776→            <Input id="create-class-name" value={name} onChange={(e) => setName(e.target.value)} disabled={submitting} placeholder="e.g., Beginner Group" />
+  1777→          </div>
+  1778→          <div className="space-y-2">
+  1779→            <Label htmlFor="create-class-capacity">Capacity (optional, default 12)</Label>
+  1780→            <Input id="create-class-capacity" type="number" value={capacity} onChange={(e) => setCapacity(e.target.value)} disabled={submitting} placeholder="12" />
+  1781→          </div>
+  1782→          {error && (
+  1783→            <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 p-3">
+  1784→              <AlertCircle className="h-4 w-4 text-destructive flex-shrink-0 mt-0.5" aria-hidden />
+  1785→              <p className="text-sm text-destructive">{error}</p>
+  1786→            </div>
+  1787→          )}
+  1788→        </div>
+  1789→        <DialogFooter className="gap-2">
+  1790→          <Button variant="outline" onClick={handleClose} disabled={submitting}>Cancel</Button>
+  1791→          <Button onClick={handleSubmit} disabled={submitting}>
+  1792→            {submitting ? <><Loader2 className="h-4 w-4 animate-spin" aria-hidden /> Creating…</> : "Create Class"}
+  1793→          </Button>
+  1794→        </DialogFooter>
+  1795→      </DialogContent>
+  1796→    </Dialog>
+  1797→  );
+  1798→}
+  1799→
+  1800→// === Edit Class Dialog ==================================================
+  1801→
+  1802→function EditClassDialog({ open, onClose, classRow, academyId, onSaved }: {
+  1803→  open: boolean; onClose: () => void; classRow: ClassRow; academyId: string; onSaved: () => void;
+  1804→}) {
+  1805→  const [name, setName] = useState(classRow.name);
+  1806→  const [capacity, setCapacity] = useState(String(classRow.capacity));
+  1807→  const [isActive, setIsActive] = useState(classRow.isActive);
+  1808→  const [submitting, setSubmitting] = useState(false);
+  1809→  const [error, setError] = useState<string | null>(null);
+  1810→
+  1811→  const handleSubmit = async () => {
+  1812→    if (!name.trim()) { setError("Class name is required."); return; }
+  1813→    setSubmitting(true); setError(null);
+  1814→    try {
+  1815→      const body: Record<string, unknown> = { name: name.trim() };
+  1816→      const capNum = parseInt(capacity, 10);
+  1817→      if (capNum > 0) body.capacity = capNum;
+  1818→      body.isActive = isActive;
+  1819→      const res = await adminFetch(`/api/admin/classes/${classRow.id}?academyId=${academyId}`, "PUT", body);
+  1820→      if (res.ok) { onSaved(); return; }
+  1821→      const data = (await res.json()) as { error?: { message?: string } };
+  1822→      setError(data.error?.message ?? `Error ${res.status}`);
+  1823→    } catch { setError("Network error"); }
+  1824→    finally { setSubmitting(false); }
+  1825→  };
+  1826→
+  1827→  const handleClose = () => { if (submitting) return; onClose(); };
+  1828→
+  1829→  return (
+  1830→    <Dialog open={open} onOpenChange={(v) => { if (!v) handleClose(); }}>
+  1831→      <DialogContent className="sm:max-w-md">
+  1832→        <DialogHeader><DialogTitle>Edit Class</DialogTitle></DialogHeader>
+  1833→        <div className="space-y-4">
+  1834→          <div className="space-y-2">
+  1835→            <Label htmlFor="edit-class-name">Class Name *</Label>
+  1836→            <Input id="edit-class-name" value={name} onChange={(e) => setName(e.target.value)} disabled={submitting} />
+  1837→          </div>
+  1838→          <div className="space-y-2">
+  1839→            <Label htmlFor="edit-class-capacity">Capacity</Label>
+  1840→            <Input id="edit-class-capacity" type="number" value={capacity} onChange={(e) => setCapacity(e.target.value)} disabled={submitting} />
+  1841→          </div>
+  1842→          <div className="flex items-center gap-2">
+  1843→            <input type="checkbox" id="edit-class-active" checked={isActive} onChange={(e) => setIsActive(e.target.checked)} disabled={submitting} className="h-4 w-4 rounded border-gray-300" />
+  1844→            <Label htmlFor="edit-class-active" className="text-sm">Active</Label>
+  1845→          </div>
+  1846→          {error && (
+  1847→            <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 p-3">
+  1848→              <AlertCircle className="h-4 w-4 text-destructive flex-shrink-0 mt-0.5" aria-hidden />
+  1849→              <p className="text-sm text-destructive">{error}</p>
+  1850→            </div>
+  1851→          )}
+  1852→        </div>
+  1853→        <DialogFooter className="gap-2">
+  1854→          <Button variant="outline" onClick={handleClose} disabled={submitting}>Cancel</Button>
+  1855→          <Button onClick={handleSubmit} disabled={submitting}>
+  1856→            {submitting ? <><Loader2 className="h-4 w-4 animate-spin" aria-hidden /> Saving…</> : "Save Changes"}
+  1857→          </Button>
+  1858→        </DialogFooter>
+  1859→      </DialogContent>
+  1860→    </Dialog>
+  1861→  );
+  1862→}
+  1863→

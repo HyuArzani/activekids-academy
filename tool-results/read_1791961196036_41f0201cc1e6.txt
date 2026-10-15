@@ -1,0 +1,722 @@
+     1→/**
+     2→ * Domain: Public parent registration applications.
+     3→ *
+     4→ * Stage 7B: A public, unauthenticated workflow for prospective parents to
+     5→ * submit a registration APPLICATION. This is NOT account creation — a
+     6→ * submitted application does NOT create a student, guardian, package,
+     7→ * entitlement, occurrence, or payment. An Admin must review and approve.
+     8→ *
+     9→ * Lifecycle: pending → approved | rejected.
+    10→ *
+    11→ * Idempotency: client-supplied idempotency_key + body hash. Same key +
+    12→ * same hash → return original. Same key + different hash → 409.
+    13→ *
+    14→ * Rate limiting: reuses the existing DB-backed IP rate limiter
+    15→ * (checkRateLimit with identifier_type='ip'). The same login_attempts
+    16→ * table tracks IP-based abuse.
+    17→ *
+    18→ * Duplicate detection (approval):
+    19→ *   - Before creating a student, check if a student with the same
+    20→ *     full_name AND date_of_birth already exists in the academy.
+    21→ *   - If a duplicate is found, the approval FAILS with a clear CONFLICT
+    22→ *     (the Admin must resolve manually — either reject the application or
+    23→ *     archive the existing student first). This is the safest minimal
+    24→ *     implementation; automatic linking to an existing student is NOT
+    25→ *     done because it could silently grant access to the wrong family.
+    26→ *   - Duplicate guardian relationships (same guardian_user_id + student_id)
+    27→ *     are prevented by the existing UNIQUE constraint on
+    28→ *     guardian_student_links.
+    29→ *
+    30→ * Approval atomicity:
+    31→ *   - SERIALIZABLE tx: create student → create guardian user (if the
+    32→ *     parent_email is unique) → create guardian_student_link → set
+    33→ *     application.status='approved' + student_id. If any step fails, all
+    34→ *     roll back. The application stays 'pending'.
+    35→ *   - Idempotent: if the application is already 'approved', return the
+    36→ *     existing student_id without re-creating.
+    37→ *
+    38→ * Server-only. Never import from client code.
+    39→ */
+    40→
+    41→import { createHash } from "node:crypto";
+    42→import type { DbClient, TxClient } from "@/lib/db";
+    43→import { getDb } from "@/lib/db";
+    44→import { Err } from "@/lib/errors";
+    45→import { writeAudit } from "@/lib/audit/writer";
+    46→import type { Principal } from "@/lib/auth/principal";
+    47→import { requireRole } from "@/lib/auth/principal";
+    48→import { checkAndRecordRegistrationRateLimit } from "@/lib/auth/rateLimit";
+    49→import {
+    50→  requireAcademyContext,
+    51→  newId,
+    52→} from "./helpers";
+    53→import { createStudent } from "./students";
+    54→import { createEnrollment } from "./enrollments";
+    55→import { hashPassword, paramsToJson } from "@/lib/auth/password";
+    56→
+    57→// === Types ===============================================================
+    58→
+    59→export interface SubmitRegistrationInput {
+    60→  academyId: string;
+    61→  parentFullName: string;
+    62→  parentPhone: string;
+    63→  parentEmail?: string;
+    64→  preferredContact?: "phone" | "email" | "whatsapp";
+    65→  childFullName: string;
+    66→  childDateOfBirth?: string; // YYYY-MM-DD
+    67→  classPreference?: string;
+    68→  preferredDay?: string;
+    69→  notes?: string;
+    70→  idempotencyKey?: string;
+    71→}
+    72→
+    73→export interface RegistrationApplicationRow {
+    74→  id: string;
+    75→  academyId: string;
+    76→  parentFullName: string;
+    77→  parentPhone: string;
+    78→  parentEmail: string | null;
+    79→  preferredContact: string | null;
+    80→  childFullName: string;
+    81→  childDateOfBirth: string | null;
+    82→  classPreference: string | null;
+    83→  preferredDay: string | null;
+    84→  notes: string | null;
+    85→  source: string;
+    86→  status: string;
+    87→  reviewedBy: string | null;
+    88→  reviewedAt: string | null;
+    89→  rejectionReason: string | null;
+    90→  studentId: string | null;
+    91→  submittedAt: string;
+    92→}
+    93→
+    94→// === Public submission ==================================================
+    95→
+    96→/**
+    97→ * Submit a registration application (PUBLIC — unauthenticated).
+    98→ * Creates a 'pending' application only. Does NOT create student/guardian/
+    99→ * package/entitlement/payment.
+   100→ *
+   101→ * Rate limiting: reuses checkRateLimit with the submitter's IP. The same
+   102→ * login_attempts table tracks IP-based abuse (20 attempts per 15 min).
+   103→ *
+   104→ * Idempotency: if idempotencyKey is provided, same key + same body hash
+   105→ * → return original. Same key + different hash → 409.
+   106→ *
+   107→ * The `source` is server-controlled: 'website' for direct public
+   108→ * submissions. Future Google Forms integration will use a separate
+   109→ * authenticated server-side endpoint that sets source='google_form'.
+   110→ * The public endpoint NEVER accepts a client-provided source.
+   111→ */
+   112→export async function submitRegistration(
+   113→  input: SubmitRegistrationInput,
+   114→  clientIp: string | null,
+   115→  db: DbClient = getDb(),
+   116→): Promise<{ applicationId: string; replayed: boolean }> {
+   117→  // Validate required fields.
+   118→  if (!input.academyId) throw Err.validation("Academy ID is required.");
+   119→  if (!input.parentFullName || input.parentFullName.trim() === "") {
+   120→    throw Err.validation("Parent full name is required.");
+   121→  }
+   122→  if (!input.parentPhone || input.parentPhone.trim() === "") {
+   123→    throw Err.validation("Parent phone number is required.");
+   124→  }
+   125→  if (!input.childFullName || input.childFullName.trim() === "") {
+   126→    throw Err.validation("Child full name is required.");
+   127→  }
+   128→
+   129→  const bodyHash = input.idempotencyKey ? computeBodyHash(input) : null;
+   130→
+   131→  // Idempotency replay check (BEFORE rate limiting — replays don't
+   132→  // consume a rate-limit slot). Fast path: if the application already
+   133→  // exists with the same body hash, return it without rate-limiting.
+   134→  if (input.idempotencyKey) {
+   135→    const existing = await db.query<{ id: string; idempotency_body_hash: string | null }>(
+   136→      `SELECT id, idempotency_body_hash
+   137→         FROM registration_applications
+   138→        WHERE academy_id = $1 AND idempotency_key = $2
+   139→        LIMIT 1;`,
+   140→      [input.academyId, input.idempotencyKey],
+   141→    );
+   142→    const existingRow = existing.rows[0] as { id: string; idempotency_body_hash: string | null } | undefined;
+   143→    if (existingRow) {
+   144→      if (existingRow.idempotency_body_hash === bodyHash) {
+   145→        return { applicationId: existingRow.id, replayed: true };
+   146→      }
+   147→      throw Err.conflict(
+   148→        "Idempotency key was already used with different request data.",
+   149→        "idempotency_key_reuse",
+   150→      );
+   151→    }
+   152→  }
+   153→
+   154→  // Rate limit by IP — ONLY for NEW (non-replay) requests.
+   155→  // Uses checkAndRecordRegistrationRateLimit (atomic INSERT + COUNT in a
+   156→  // SERIALIZABLE tx) so concurrent requests from the same IP cannot all
+   157→  // pass before any records. Uses a 'reg:'-prefixed identifier so
+   158→  // registration attempts do NOT count toward login IP limits.
+   159→  if (clientIp) {
+   160→    const decision = await checkAndRecordRegistrationRateLimit(db, clientIp);
+   161→    if (!decision.allowed) {
+   162→      throw Err.rateLimited(
+   163→        `Too many registration attempts from this IP. Try again in ${decision.retryAfterSeconds} seconds.`,
+   164→      );
+   165→    }
+   166→  }
+   167→
+   168→  const result = await db.withTxSerializable(async (tx) => {
+   169→    // Re-check idempotency inside the tx (concurrent duplicate).
+   170→    if (input.idempotencyKey) {
+   171→      const recheck = await tx.query<{ id: string; idempotency_body_hash: string | null }>(
+   172→        `SELECT id, idempotency_body_hash
+   173→           FROM registration_applications
+   174→          WHERE academy_id = $1 AND idempotency_key = $2
+   175→          LIMIT 1;`,
+   176→        [input.academyId, input.idempotencyKey],
+   177→      );
+   178→      const row = recheck.rows[0] as { id: string; idempotency_body_hash: string | null } | undefined;
+   179→      if (row) {
+   180→        if (row.idempotency_body_hash === bodyHash) {
+   181→          return { applicationId: row.id, replayed: true };
+   182→        }
+   183→        throw Err.conflict(
+   184→          "Idempotency key was already used with different request data.",
+   185→          "idempotency_key_reuse",
+   186→        );
+   187→      }
+   188→    }
+   189→
+   190→    const id = newId();
+   191→    await tx.query(
+   192→      `INSERT INTO registration_applications
+   193→         (id, academy_id, parent_full_name, parent_phone, parent_email, preferred_contact,
+   194→          child_full_name, child_date_of_birth, class_preference, preferred_day, notes,
+   195→          source, idempotency_key, idempotency_body_hash, submitted_ip, status)
+   196→       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'website', $12, $13, $14, 'pending');`,
+   197→      [
+   198→        id, input.academyId,
+   199→        input.parentFullName,
+   200→        input.parentPhone,
+   201→        input.parentEmail ?? null,
+   202→        input.preferredContact ?? null,
+   203→        input.childFullName,
+   204→        input.childDateOfBirth ?? null,
+   205→        input.classPreference ?? null,
+   206→        input.preferredDay ?? null,
+   207→        input.notes ?? null,
+   208→        input.idempotencyKey ?? null,
+   209→        bodyHash,
+   210→        clientIp,
+   211→      ],
+   212→    );
+   213→
+   214→    return { applicationId: id, replayed: false };
+   215→  });
+   216→
+   217→  return result;
+   218→}
+   219→
+   220→// === Admin: list + detail ===============================================
+   221→
+   222→export async function listRegistrationApplications(
+   223→  principal: Principal,
+   224→  academyId: string,
+   225→  statusFilter: "pending" | "approved" | "rejected" | "all" = "pending",
+   226→  db: DbClient = getDb(),
+   227→): Promise<RegistrationApplicationRow[]> {
+   228→  requireAcademyContext(principal, academyId);
+   229→  requireRole(principal, "admin", academyId);
+   230→
+   231→  const params: unknown[] = [academyId];
+   232→  let statusClause = "";
+   233→  if (statusFilter !== "all") {
+   234→    params.push(statusFilter);
+   235→    statusClause = `AND status = $2`;
+   236→  }
+   237→
+   238→  const result = await db.query<RegistrationApplicationRow>(
+   239→    `SELECT id, academy_id AS "academyId",
+   240→            parent_full_name AS "parentFullName", parent_phone AS "parentPhone",
+   241→            parent_email AS "parentEmail", preferred_contact AS "preferredContact",
+   242→            child_full_name AS "childFullName",
+   243→            child_date_of_birth AS "childDateOfBirth",
+   244→            class_preference AS "classPreference", preferred_day AS "preferredDay",
+   245→            notes, source, status, reviewed_by AS "reviewedBy",
+   246→            to_char(reviewed_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS "reviewedAt",
+   247→            rejection_reason AS "rejectionReason", student_id AS "studentId",
+   248→            to_char(submitted_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS "submittedAt"
+   249→       FROM registration_applications
+   250→      WHERE academy_id = $1 ${statusClause}
+   251→      ORDER BY submitted_at DESC;`,
+   252→    params,
+   253→  );
+   254→  return result.rows as RegistrationApplicationRow[];
+   255→}
+   256→
+   257→export async function getRegistrationApplication(
+   258→  principal: Principal,
+   259→  academyId: string,
+   260→  applicationId: string,
+   261→  db: DbClient = getDb(),
+   262→): Promise<RegistrationApplicationRow> {
+   263→  requireAcademyContext(principal, academyId);
+   264→  requireRole(principal, "admin", academyId);
+   265→
+   266→  const result = await db.query<RegistrationApplicationRow>(
+   267→    `SELECT id, academy_id AS "academyId",
+   268→            parent_full_name AS "parentFullName", parent_phone AS "parentPhone",
+   269→            parent_email AS "parentEmail", preferred_contact AS "preferredContact",
+   270→            child_full_name AS "childFullName",
+   271→            child_date_of_birth AS "childDateOfBirth",
+   272→            class_preference AS "classPreference", preferred_day AS "preferredDay",
+   273→            notes, source, status, reviewed_by AS "reviewedBy",
+   274→            to_char(reviewed_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS "reviewedAt",
+   275→            rejection_reason AS "rejectionReason", student_id AS "studentId",
+   276→            to_char(submitted_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS "submittedAt"
+   277→       FROM registration_applications
+   278→      WHERE id = $1 AND academy_id = $2
+   279→      LIMIT 1;`,
+   280→    [applicationId, academyId],
+   281→  );
+   282→  const row = result.rows[0] as RegistrationApplicationRow | undefined;
+   283→  if (!row) throw Err.notFound("Registration application not found in this academy.");
+   284→  return row;
+   285→}
+   286→
+   287→// === Admin: approve =====================================================
+   288→
+   289→/**
+   290→ * Approve a registration application. Creates operational records:
+   291→ *   - student (via createStudent — reuses existing domain + constraints).
+   292→ *   - guardian user (if parent_email is unique) + guardian_student_link.
+   293→ *   - enrollment (if class_preference resolves to a real class UUID —
+   294→ *     otherwise skipped; the Admin can enroll manually later).
+   295→ *
+   296→ * Does NOT create packages, entitlements, or payments.
+   297→ *
+   298→ * Idempotent: if already approved, returns the existing student_id.
+   299→ *
+   300→ * Duplicate detection: if a student with the same full_name + DOB already
+   301→ * exists in the academy, the approval FAILS with CONFLICT. The Admin must
+   302→ * resolve manually (reject the application or archive the existing student).
+   303→ *
+   304→ * Transactional: SERIALIZABLE tx — all records created or none.
+   305→ */
+   306→export async function approveRegistration(
+   307→  principal: Principal,
+   308→  academyId: string,
+   309→  applicationId: string,
+   310→  db: DbClient = getDb(),
+   311→): Promise<{ studentId: string; replayed: boolean }> {
+   312→  requireAcademyContext(principal, academyId);
+   313→  requireRole(principal, "admin", academyId);
+   314→
+   315→  // Pre-compute the Argon2id hash for the provisional guardian user
+   316→  // OUTSIDE the SERIALIZABLE tx — Argon2id is CPU-intensive and should
+   317→  // not run inside a DB transaction. The hash is only used if the
+   318→  // parent_email doesn't match an existing user (determined inside the tx).
+   319→  const provisionalPassword = `provisional-${newId()}`;
+   320→  const provisionalHash = await hashPassword(provisionalPassword);
+   321→  const provisionalParams = JSON.stringify(paramsToJson());
+   322→
+   323→  return db.withTxSerializable(async (tx) => {
+   324→    // Load + lock the application.
+   325→    const appResult = await tx.query<{
+   326→      id: string; status: string; student_id: string | null;
+   327→      parent_full_name: string; parent_email: string | null;
+   328→      child_full_name: string; child_date_of_birth: string | null;
+   329→      class_preference: string | null;
+   330→      resolved_guardian_user_id: string | null;
+   331→    }>(
+   332→      `SELECT id, status, student_id, parent_full_name, parent_email,
+   333→              child_full_name, child_date_of_birth, class_preference,
+   334→              resolved_guardian_user_id
+   335→         FROM registration_applications
+   336→        WHERE id = $1 AND academy_id = $2
+   337→        LIMIT 1;`,
+   338→      [applicationId, academyId],
+   339→    );
+   340→    const app = appResult.rows[0] as
+   341→      | { id: string; status: string; student_id: string | null; parent_full_name: string; parent_email: string | null; child_full_name: string; child_date_of_birth: string | null; class_preference: string | null; resolved_guardian_user_id: string | null }
+   342→      | undefined;
+   343→    if (!app) throw Err.notFound("Registration application not found in this academy.");
+   344→    await tx.query(`SELECT id FROM registration_applications WHERE id = $1 FOR UPDATE;`, [app.id]);
+   345→
+   346→    // Idempotent: already approved → return existing student_id.
+   347→    if (app.status === "approved" && app.student_id) {
+   348→      return { studentId: app.student_id, replayed: true };
+   349→    }
+   350→    if (app.status === "rejected") {
+   351→      throw Err.conflict("Cannot approve a rejected application.");
+   352→    }
+   353→
+   354→    // Duplicate student detection — safe policy:
+   355→    //   - Same full_name + same non-null DOB → definitive duplicate → CONFLICT.
+   356→    //   - Same full_name + either DOB is NULL → ambiguous (cannot rule out
+   357→    //     a match) → CONFLICT requiring Admin resolution.
+   358→    //   - Same full_name + both DOBs non-null and different → safe, proceed.
+   359→    // Never treats name-only match as definitive identity, but does flag
+   360→    // it as a credible possible match requiring resolution.
+   361→    const dupResult = await tx.query<{ id: string }>(
+   362→      `SELECT s.id
+   363→         FROM students s
+   364→        WHERE s.academy_id = $1
+   365→          AND s.full_name = $2
+   366→          AND (
+   367→            -- Both DOBs non-null and match → definitive duplicate.
+   368→            (s.date_of_birth IS NOT NULL AND $3::date IS NOT NULL AND s.date_of_birth = $3::date)
+   369→            -- Either DOB NULL → ambiguous (cannot rule out a match).
+   370→            OR s.date_of_birth IS NULL
+   371→            OR $3::date IS NULL
+   372→          )
+   373→        LIMIT 1;`,
+   374→      [academyId, app.child_full_name, app.child_date_of_birth],
+   375→    );
+   376→    if (dupResult.rows[0]) {
+   377→      throw Err.conflict(
+   378→        "A student with the same name already exists in the academy" +
+   379→        (app.child_date_of_birth
+   380→          ? " and the date of birth matches or is missing on the existing record."
+   381→          : " and this application has no date of birth."
+   382→        ) + " Resolve the duplicate before approving (archive the existing student or reject this application).",
+   383→      );
+   384→    }
+   385→
+   386→    // Parent email required for reliable guardian provisioning.
+   387→    // Without email, the parent cannot be reliably identified or provisioned.
+   388→    // The Admin must add an email to the application before approving.
+   389→    if (!app.parent_email) {
+   390→      throw Err.conflict(
+   391→        "Cannot approve: parent email is required for guardian provisioning. Add the parent's email to the application, or approve without a guardian link via manual Admin action.",
+   392→      );
+   393→    }
+   394→
+   395→    // Create the student (reuses the existing domain operation).
+   396→    // We need a Principal that works inside this tx — createStudent uses
+   397→    // its own tx internally, so we call it AFTER this tx with the result.
+   398→    // Actually, createStudent opens its own tx. To keep this atomic, we
+   399→    // inline the student creation here instead of calling createStudent.
+   400→    const studentId = newId();
+   401→    await tx.query(
+   402→      `INSERT INTO students (id, academy_id, full_name, date_of_birth, notes)
+   403→       VALUES ($1, $2, $3, $4, $5);`,
+   404→      [
+   405→        studentId, academyId, app.child_full_name,
+   406→        app.child_date_of_birth, `Approved from registration ${app.id}`,
+   407→      ],
+   408→    );
+   409→    await writeAudit({
+   410→      tx, academyId, actorUserId: principal.userId,
+   411→      action: "student.create_from_registration",
+   412→      targetType: "students", targetId: studentId,
+   413→      after: { fullName: app.child_full_name, applicationId: app.id },
+   414→    });
+   415→
+   416→    // Resolve class_preference to a class (academy-scoped).
+   417→    //
+   418→    // The public registration form accepts free-text classPreference, so
+   419→    // the value may be either:
+   420→    //   (a) a class UUID (rare — the public form doesn't expose UUIDs), or
+   421→    //   (b) a class NAME (e.g. "Semangat") — the common case.
+   422→    //
+   423→    // We try BOTH: if the value parses as a UUID, look up by id; otherwise
+   424→    // (or if the id lookup returns nothing), fall back to a case-insensitive
+   425→    // name match within the academy. If neither matches, enrollment is
+   426→    // skipped (the Admin can enroll manually later).
+   427→    //
+   428→    // CRITICAL: the original code queried `WHERE id = $1` on the uuid
+   429→    // column with an arbitrary string, which caused a 502 PostgreSQL type
+   430→    // error when class_preference was a class name like "Semangat". This
+   431→    // fix validates the UUID format first and falls back to name matching.
+   432→    if (app.class_preference) {
+   433→      let classId: string | null = null;
+   434→
+   435→      // Validate UUID format before querying the uuid column. The regex
+   436→      // matches RFC 4122 UUIDs (8-4-4-4-12 hex digits). Non-matching
+   437→      // strings skip the id lookup and go straight to name matching.
+   438→      const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$/;
+   439→      if (UUID_RE.test(app.class_preference)) {
+   440→        const idResult = await tx.query<{ id: string }>(
+   441→          `SELECT id FROM classes WHERE id = $1 AND academy_id = $2 LIMIT 1;`,
+   442→          [app.class_preference, academyId],
+   443→        );
+   444→        if (idResult.rows[0]) {
+   445→          classId = (idResult.rows[0] as { id: string }).id;
+   446→        }
+   447→      }
+   448→
+   449→      // Fall back to case-insensitive name match within the academy.
+   450→      // LOWER(class_name) = LOWER($1) is case-insensitive and collation-safe.
+   451→      if (!classId) {
+   452→        const nameResult = await tx.query<{ id: string }>(
+   453→          `SELECT id FROM classes
+   454→            WHERE academy_id = $1
+   455→              AND LOWER(name) = LOWER($2)
+   456→              AND is_active = true
+   457→            LIMIT 1;`,
+   458→          [academyId, app.class_preference],
+   459→        );
+   460→        if (nameResult.rows[0]) {
+   461→          classId = (nameResult.rows[0] as { id: string }).id;
+   462→        }
+   463→      }
+   464→
+   465→      if (classId) {
+   466→        // Compute today's date in Jakarta for effective_from.
+   467→        const today = await computeTodayJakarta(tx);
+   468→        await tx.query(
+   469→          `INSERT INTO student_enrollments (id, student_id, class_id, effective_from)
+   470→           VALUES ($1, $2, $3, $4);`,
+   471→          [newId(), studentId, classId, today],
+   472→        );
+   473→        await writeAudit({
+   474→          tx, academyId, actorUserId: principal.userId,
+   475→          action: "enrollment.create_from_registration",
+   476→          targetType: "student_enrollments", targetId: studentId,
+   477→          after: { studentId, classId, effectiveFrom: today },
+   478→        });
+   479→      }
+   480→    }
+   481→
+   482→    // Guardian provisioning — safe policy:
+   483→    //   - If resolved_guardian_user_id is set (Admin explicitly verified):
+   484→    //     link to that guardian (no new user, no email check).
+   485→    //   - If parent_email does NOT match an existing user → create a new
+   486→    //     provisional user (safe: the email is new).
+   487→    //   - If parent_email MATCHES an existing user → CONFLICT (Admin must
+   488→    //     resolve via resolveExistingGuardian first).
+   489→    let guardianUserId: string | null = null;
+   490→    if (app.resolved_guardian_user_id) {
+   491→      // Admin explicitly selected an existing guardian after verification.
+   492→      guardianUserId = app.resolved_guardian_user_id;
+   493→    } else if (app.parent_email) {
+   494→      const existingUser = await tx.query<{ id: string }>(
+   495→        `SELECT id FROM users WHERE email = $1 LIMIT 1;`,
+   496→        [app.parent_email],
+   497→      );
+   498→      if (existingUser.rows[0]) {
+   499→        // An account with this email already exists. Do NOT auto-link.
+   500→        // The applicant might not be the account owner.
+   501→        throw Err.conflict(
+   502→          "An account with this parent email already exists. The Admin must verify the parent's identity and manually link the guardian to the student before approving, or instruct the parent to use a different email.",
+   503→        );
+   504→      } else {
+   505→        // Create a provisional parent user with must_change_password=true.
+   506→        // The hash was pre-computed outside the tx.
+   507→        guardianUserId = newId();
+   508→        await tx.query(
+   509→          `INSERT INTO users (id, email, status, must_change_password)
+   510→           VALUES ($1, $2, 'active', true);`,
+   511→          [guardianUserId, app.parent_email],
+   512→        );
+   513→        await tx.query(
+   514→          `INSERT INTO user_credentials (user_id, argon2id_hash, argon2_params)
+   515→           VALUES ($1, $2, $3);`,
+   516→          [guardianUserId, provisionalHash, provisionalParams],
+   517→        );
+   518→        await tx.query(
+   519→          `INSERT INTO academy_memberships (id, user_id, academy_id, role, status)
+   520→           VALUES ($1, $2, $3, 'parent', 'active');`,
+   521→          [newId(), guardianUserId, academyId],
+   522→        );
+   523→        await writeAudit({
+   524→          tx, academyId, actorUserId: principal.userId,
+   525→          action: "guardian.create_from_registration",
+   526→          targetType: "users", targetId: guardianUserId,
+   527→          after: { email: app.parent_email, studentId },
+   528→        });
+   529→      }
+   530→
+   531→    }
+   532→
+   533→    // Link guardian to student (UNIQUE on guardian_user_id + student_id).
+   534→    // This runs for BOTH resolved guardians and newly-provisioned users.
+   535→    if (guardianUserId) {
+   536→      try {
+   537→        await tx.query(
+   538→          `INSERT INTO guardian_student_links (id, guardian_user_id, student_id, is_primary, relationship)
+   539→           VALUES ($1, $2, $3, true, null);`,
+   540→          [newId(), guardianUserId, studentId],
+   541→        );
+   542→      } catch {
+   543→        // Already linked — not an error.
+   544→      }
+   545→    }
+   546→
+   547→    // Mark the application as approved.
+   548→    await tx.query(
+   549→      `UPDATE registration_applications
+   550→          SET status = 'approved', reviewed_by = $2, reviewed_at = now(),
+   551→              student_id = $3, updated_at = now()
+   552→        WHERE id = $1;`,
+   553→      [app.id, principal.userId, studentId],
+   554→    );
+   555→
+   556→    await writeAudit({
+   557→      tx, academyId, actorUserId: principal.userId,
+   558→      action: "registration.approve",
+   559→      targetType: "registration_applications", targetId: app.id,
+   560→      after: { studentId, guardianUserId },
+   561→    });
+   562→
+   563→    return { studentId, replayed: false };
+   564→  });
+   565→}
+   566→
+   567→// === Admin: reject ======================================================
+   568→
+   569→export async function rejectRegistration(
+   570→  principal: Principal,
+   571→  academyId: string,
+   572→  applicationId: string,
+   573→  reason: string,
+   574→  db: DbClient = getDb(),
+   575→): Promise<void> {
+   576→  requireAcademyContext(principal, academyId);
+   577→  requireRole(principal, "admin", academyId);
+   578→
+   579→  if (!reason || reason.trim() === "") {
+   580→    throw Err.validation("A non-empty rejection reason is required.");
+   581→  }
+   582→
+   583→  return db.withTxSerializable(async (tx) => {
+   584→    const appResult = await tx.query<{ id: string; status: string }>(
+   585→      `SELECT id, status FROM registration_applications
+   586→        WHERE id = $1 AND academy_id = $2 LIMIT 1;`,
+   587→      [applicationId, academyId],
+   588→    );
+   589→    const app = appResult.rows[0] as { id: string; status: string } | undefined;
+   590→    if (!app) throw Err.notFound("Registration application not found in this academy.");
+   591→    await tx.query(`SELECT id FROM registration_applications WHERE id = $1 FOR UPDATE;`, [app.id]);
+   592→
+   593→    if (app.status === "approved") {
+   594→      throw Err.conflict("Cannot reject an already-approved application.");
+   595→    }
+   596→    if (app.status === "rejected") {
+   597→      throw Err.conflict("Application is already rejected.");
+   598→    }
+   599→
+   600→    await tx.query(
+   601→      `UPDATE registration_applications
+   602→          SET status = 'rejected', reviewed_by = $2, reviewed_at = now(),
+   603→              rejection_reason = $3, updated_at = now()
+   604→        WHERE id = $1;`,
+   605→      [app.id, principal.userId, reason],
+   606→    );
+   607→
+   608→    await writeAudit({
+   609→      tx, academyId, actorUserId: principal.userId,
+   610→      action: "registration.reject",
+   611→      targetType: "registration_applications", targetId: app.id,
+   612→      after: { reason },
+   613→    });
+   614→  });
+   615→}
+   616→
+   617→// === Helpers =============================================================
+   618→
+   619→function stableStringify(value: unknown): string {
+   620→  if (value === null || typeof value !== "object") return JSON.stringify(value);
+   621→  if (Array.isArray(value)) return "[" + value.map(stableStringify).join(",") + "]";
+   622→  const obj = value as Record<string, unknown>;
+   623→  const keys = Object.keys(obj).filter((k) => k !== "idempotencyKey").sort();
+   624→  return "{" + keys.map((k) => JSON.stringify(k) + ":" + stableStringify(obj[k])).join(",") + "}";
+   625→}
+   626→
+   627→// === Admin: resolve existing guardian (P2) ==============================
+   628→
+   629→/**
+   630→ * Admin explicitly selects an existing guardian for a registration
+   631→ * application. This is used when the parent_email matches an existing
+   632→ * user and the Admin has verified the parent's identity out-of-band.
+   633→ *
+   634→ * Sets resolved_guardian_user_id on the application. When approval
+   635→ * runs, it links the child to this guardian instead of creating a new
+   636→ * user. The guardian must belong to the same academy (have an active
+   637→ * academy membership).
+   638→ *
+   639→ * Audited: records the Admin, timestamp, reason, and selected guardian.
+   640→ */
+   641→export async function resolveExistingGuardian(
+   642→  principal: Principal,
+   643→  academyId: string,
+   644→  applicationId: string,
+   645→  guardianUserId: string,
+   646→  reason: string,
+   647→  db: DbClient = getDb(),
+   648→): Promise<void> {
+   649→  requireAcademyContext(principal, academyId);
+   650→  requireRole(principal, "admin", academyId);
+   651→
+   652→  if (!reason || reason.trim() === "") {
+   653→    throw Err.validation("A non-empty resolution reason is required.");
+   654→  }
+   655→
+   656→  return db.withTxSerializable(async (tx) => {
+   657→    // Load + lock the application.
+   658→    const appResult = await tx.query<{ id: string; status: string }>(
+   659→      `SELECT id, status FROM registration_applications
+   660→        WHERE id = $1 AND academy_id = $2 LIMIT 1;`,
+   661→      [applicationId, academyId],
+   662→    );
+   663→    const app = appResult.rows[0] as { id: string; status: string } | undefined;
+   664→    if (!app) throw Err.notFound("Registration application not found in this academy.");
+   665→    await tx.query(`SELECT id FROM registration_applications WHERE id = $1 FOR UPDATE;`, [app.id]);
+   666→
+   667→    if (app.status === "approved") {
+   668→      throw Err.conflict("Cannot resolve guardian for an already-approved application.");
+   669→    }
+   670→
+   671→    // Verify the guardian belongs to the same academy (active membership).
+   672→    const guardianResult = await tx.query<{ id: string }>(
+   673→      `SELECT u.id
+   674→         FROM users u
+   675→         JOIN academy_memberships am ON am.user_id = u.id
+   676→        WHERE u.id = $1
+   677→          AND am.academy_id = $2
+   678→          AND am.status = 'active'
+   679→        LIMIT 1;`,
+   680→      [guardianUserId, academyId],
+   681→    );
+   682→    if (!guardianResult.rows[0]) {
+   683→      throw Err.notFound("Selected guardian not found in this academy.");
+   684→    }
+   685→
+   686→    // Set the resolution.
+   687→    await tx.query(
+   688→      `UPDATE registration_applications
+   689→          SET resolved_guardian_user_id = $2,
+   690→              resolution_reason = $3,
+   691→              resolved_by = $4,
+   692→              resolved_at = now(),
+   693→              updated_at = now()
+   694→        WHERE id = $1;`,
+   695→      [app.id, guardianUserId, reason, principal.userId],
+   696→    );
+   697→
+   698→    await writeAudit({
+   699→      tx, academyId, actorUserId: principal.userId,
+   700→      action: "registration.resolve_guardian",
+   701→      targetType: "registration_applications", targetId: app.id,
+   702→      after: { guardianUserId },
+   703→      reason,
+   704→    });
+   705→  });
+   706→}
+   707→
+   708→export function computeBodyHash(input: SubmitRegistrationInput): string {
+   709→  return createHash("sha256").update(stableStringify(input)).digest("hex");
+   710→}
+   711→
+   712→/**
+   713→ * Compute today's date in Asia/Jakarta using a SQL query (so it works
+   714→ * inside a tx and doesn't depend on the server's clock).
+   715→ */
+   716→async function computeTodayJakarta(tx: TxClient): Promise<string> {
+   717→  const result = await tx.query<{ today: string }>(
+   718→    `SELECT to_char(now() AT TIME ZONE 'Asia/Jakarta', 'YYYY-MM-DD') AS today;`,
+   719→  );
+   720→  return (result.rows[0] as { today: string }).today;
+   721→}
+   722→

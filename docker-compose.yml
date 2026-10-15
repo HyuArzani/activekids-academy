@@ -1,0 +1,66 @@
+# =============================================================================
+# docker-compose.yml — Local Docker testing environment for the
+# Futsal Academy Management System.
+#
+# This file is INDEPENDENT of the Netlify deployment configuration.
+# Netlify remains the production deployment target (see netlify.toml).
+#
+# Prerequisites:
+#   1. Create a .env.docker file in the project root with the required
+#      environment variables (see docs/docker-local.md for instructions).
+#   2. Build the image: docker compose build
+#   3. Start: docker compose up -d
+#   4. Run migrations: docker compose exec app bun run db:migrate
+#   5. Provision admin: docker compose exec app bun run provision-admin
+#
+# The application is available at http://localhost:3000
+# PostgreSQL is available at localhost:5432 (localhost-only, for DB tools).
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # PostgreSQL 16 — local development database
+  # ---------------------------------------------------------------------------
+  db:
+    image: postgres:16-alpine
+    container_name: futsal-db
+    environment:
+      POSTGRES_USER: futsal
+      POSTGRES_PASSWORD: futsal_local_dev
+      POSTGRES_DB: futsal_academy
+    volumes:
+      - futsal_pg_data:/var/lib/postgresql/data
+    ports:
+      # Expose PostgreSQL on localhost:5432 for local DB tools (psql, pgAdmin).
+      # Bound to 127.0.0.1 only — NOT accessible from external networks.
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U futsal -d futsal_academy"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Next.js application (production build)
+  # ---------------------------------------------------------------------------
+  app:
+    build: .
+    container_name: futsal-app
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env.docker
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+# -----------------------------------------------------------------------------
+# Named volume — persists PostgreSQL data across container restarts.
+# Use `docker compose down` to stop (data preserved).
+# Use `docker compose down -v` to DELETE all data (irreversible!).
+# -----------------------------------------------------------------------------
+volumes:
+  futsal_pg_data:
+    name: futsal_academy_pg_data

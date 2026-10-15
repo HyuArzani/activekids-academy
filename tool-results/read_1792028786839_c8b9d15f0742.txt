@@ -1,0 +1,916 @@
+     1→"use client";
+     2→
+     3→import { useState, useRef, useEffect, useCallback } from "react";
+     4→import {
+     5→  ArrowLeft,
+     6→  AlertCircle,
+     7→  Loader2,
+     8→  RefreshCw,
+     9→  CalendarDays,
+    10→  CheckCircle2,
+    11→  XCircle,
+    12→  Clock,
+    13→  UserX,
+    14→  Save,
+    15→  Users,
+    16→} from "lucide-react";
+    17→import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+    18→import { Button } from "@/components/ui/button";
+    19→import { Badge } from "@/components/ui/badge";
+    20→import { Label } from "@/components/ui/label";
+    21→import { Input } from "@/components/ui/input";
+    22→import { Textarea } from "@/components/ui/textarea";
+    23→import { CSRF_HEADER } from "@/lib/auth/csrf";
+    24→import { toast } from "@/hooks/use-toast";
+    25→
+    26→// ============================================================================
+    27→// Types (match the API responses)
+    28→// ============================================================================
+    29→
+    30→interface OccurrenceListItem {
+    31→  id: string;
+    32→  classId: string;
+    33→  className: string;
+    34→  occurrenceDate: string; // YYYY-MM-DD
+    35→  startAt: string; // YYYY-MM-DDTHH:MM:SSZ (Jakarta wall-clock)
+    36→  endAt: string;
+    37→  status: "planned" | "completed" | "cancelled";
+    38→  capacity: number;
+    39→  cancelledReason: string | null;
+    40→  recordedCount: number;
+    41→}
+    42→
+    43→interface RosterStudent {
+    44→  student_id: string;
+    45→  full_name: string;
+    46→  enrollment_id: string;
+    47→  effective_from: string;
+    48→  effective_to: string | null;
+    49→  attendance_id: string | null;
+    50→  attendance_status: "present" | "absent" | "excused" | "late" | null;
+    51→  notes: string | null;
+    52→}
+    53→
+    54→interface RosterResponse {
+    55→  occurrence: {
+    56→    id: string;
+    57→    class_id: string;
+    58→    occurrence_date: string;
+    59→    start_at: string;
+    60→    end_at: string;
+    61→    status: string;
+    62→    capacity: number;
+    63→  };
+    64→  roster: RosterStudent[];
+    65→}
+    66→
+    67→type AttendanceStatus = "present" | "absent" | "excused" | "late";
+    68→
+    69→type ListState =
+    70→  | { status: "loading" }
+    71→  | { status: "error"; message: string }
+    72→  | { status: "success"; data: OccurrenceListItem[] };
+    73→
+    74→// ============================================================================
+    75→// Helpers
+    76→// ============================================================================
+    77→
+    78→/** Today's date in Asia/Jakarta (UTC+7), as YYYY-MM-DD. */
+    79→function jakartaTodayYmd(): string {
+    80→  const shifted = new Date(Date.now() + 7 * 60 * 60 * 1000);
+    81→  const y = shifted.getUTCFullYear();
+    82→  const m = String(shifted.getUTCMonth() + 1).padStart(2, "0");
+    83→  const d = String(shifted.getUTCDate()).padStart(2, "0");
+    84→  return `${y}-${m}-${d}`;
+    85→}
+    86→
+    87→/**
+    88→ * Format an occurrence's start/end time as Jakarta wall-clock HH:MM.
+    89→ *
+    90→ * Two endpoint shapes exist in this app:
+    91→ *   1. Occurrences listing (`/api/admin/occurrences`): returns
+    92→ *      `to_char(start_at AT TIME ZONE 'Asia/Jakarta', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')`
+    93→ *      → e.g. "2026-10-13T15:00:00Z" (Jakarta wall-clock, literal Z suffix,
+    94→ *      NO milliseconds). The HH:MM is already Jakarta; extract directly.
+    95→ *   2. Roster (`/api/admin/occurrences/:id/roster`): returns the raw
+    96→ *      `start_at` Date which JSON-serializes as UTC ISO, e.g.
+    97→ *      "2026-10-13T08:00:00.000Z" (UTC, WITH milliseconds, Z suffix).
+    98→ *      The HH:MM is UTC; shift +7h to get Jakarta.
+    99→ *
+   100→ * Distinguishing heuristic: if the string contains a milliseconds component
+   101→ * (`.NNNZ`), it's UTC (Date.toJSON output). Otherwise it's the
+   102→ * Jakarta-formatted string from to_char.
+   103→ */
+   104→function formatTime(isoLike: string): string {
+   105→  if (!isoLike) return "?";
+   106→  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(isoLike);
+   107→  if (!m) return "?";
+   108→  // Date.toJSON() output always includes ".NNN" before the Z. The to_char
+   109→  // output never includes milliseconds.
+   110→  const isUtc = /\.\d{3}Z$/.test(isoLike) || /\.\d{3}[+-]\d{2}:\d{2}$/.test(isoLike);
+   111→  if (isUtc) {
+   112→    const d = new Date(isoLike);
+   113→    if (Number.isNaN(d.getTime())) return "?";
+   114→    const shifted = new Date(d.getTime() + 7 * 60 * 60 * 1000);
+   115→    return `${String(shifted.getUTCHours()).padStart(2, "0")}:${String(shifted.getUTCMinutes()).padStart(2, "0")}`;
+   116→  }
+   117→  // Already Jakarta wall-clock (from the listing endpoint's to_char).
+   118→  return `${m[4]}:${m[5]}`;
+   119→}
+   120→
+   121→/** Format "YYYY-MM-DD" → "Weekday, DD Mon YYYY" (Indonesian-ish locale). */
+   122→function formatDateLong(ymd: string): string {
+   123→  const d = new Date(`${ymd}T00:00:00.000Z`);
+   124→  if (Number.isNaN(d.getTime())) return ymd;
+   125→  const weekdays = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+   126→  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+   127→  return `${weekdays[d.getUTCDay()]}, ${String(d.getUTCDate()).padStart(2, "0")} ${months[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
+   128→}
+   129→
+   130→const STATUS_META: Record<
+   131→  AttendanceStatus,
+   132→  { label: string; icon: React.ComponentType<{ className?: string }>; active: string; idle: string }
+   133→> = {
+   134→  present: {
+   135→    label: "Present",
+   136→    icon: CheckCircle2,
+   137→    active: "bg-emerald-600 text-white hover:bg-emerald-700 border-emerald-600",
+   138→    idle: "bg-background text-emerald-700 hover:bg-emerald-50 border-emerald-200 dark:text-emerald-400 dark:hover:bg-emerald-950",
+   139→  },
+   140→  absent: {
+   141→    label: "Absent",
+   142→    icon: XCircle,
+   143→    active: "bg-rose-600 text-white hover:bg-rose-700 border-rose-600",
+   144→    idle: "bg-background text-rose-700 hover:bg-rose-50 border-rose-200 dark:text-rose-400 dark:hover:bg-rose-950",
+   145→  },
+   146→  late: {
+   147→    label: "Late",
+   148→    icon: Clock,
+   149→    active: "bg-amber-500 text-white hover:bg-amber-600 border-amber-500",
+   150→    idle: "bg-background text-amber-700 hover:bg-amber-50 border-amber-200 dark:text-amber-400 dark:hover:bg-amber-950",
+   151→  },
+   152→  excused: {
+   153→    label: "Excused",
+   154→    icon: UserX,
+   155→    active: "bg-sky-600 text-white hover:bg-sky-700 border-sky-600",
+   156→    idle: "bg-background text-sky-700 hover:bg-sky-50 border-sky-200 dark:text-sky-400 dark:hover:bg-sky-950",
+   157→  },
+   158→};
+   159→
+   160→const ALL_STATUSES: AttendanceStatus[] = ["present", "absent", "late", "excused"];
+   161→
+   162→// ============================================================================
+   163→// Shared fetch helper (matches the pattern in AdminShell)
+   164→// ============================================================================
+   165→
+   166→async function adminFetch(url: string, method: string, body?: unknown): Promise<Response> {
+   167→  const csrfMatch = document.cookie.split("; ").find((c) => c.startsWith("futsal_csrf="));
+   168→  const csrfToken = csrfMatch?.split("=")[1] ?? "";
+   169→  return fetch(url, {
+   170→    method,
+   171→    credentials: "same-origin",
+   172→    headers: {
+   173→      "Content-Type": "application/json",
+   174→      [CSRF_HEADER]: csrfToken,
+   175→      ...(body !== undefined ? {} : {}),
+   176→    },
+   177→    body: body !== undefined ? JSON.stringify(body) : undefined,
+   178→  });
+   179→}
+   180→
+   181→// ============================================================================
+   182→// Main Component
+   183→// ============================================================================
+   184→
+   185→interface AttendanceManagementProps {
+   186→  academyId: string;
+   187→}
+   188→
+   189→export function AttendanceManagement({ academyId }: AttendanceManagementProps) {
+   190→  const [selectedDate, setSelectedDate] = useState<string>(jakartaTodayYmd());
+   191→  const [selectedOccurrenceId, setSelectedOccurrenceId] = useState<string | null>(null);
+   192→
+   193→  if (selectedOccurrenceId) {
+   194→    return (
+   195→      <AttendanceRoster
+   196→        occurrenceId={selectedOccurrenceId}
+   197→        academyId={academyId}
+   198→        onBack={() => setSelectedOccurrenceId(null)}
+   199→      />
+   200→    );
+   201→  }
+   202→
+   203→  return (
+   204→    <AttendanceSessionList
+   205→      academyId={academyId}
+   206→      selectedDate={selectedDate}
+   207→      onSelectDate={setSelectedDate}
+   208→      onSelectOccurrence={setSelectedOccurrenceId}
+   209→    />
+   210→  );
+   211→}
+   212→
+   213→// ============================================================================
+   214→// Session List (date picker + today's sessions)
+   215→// ============================================================================
+   216→
+   217→interface AttendanceSessionListProps {
+   218→  academyId: string;
+   219→  selectedDate: string;
+   220→  onSelectDate: (d: string) => void;
+   221→  onSelectOccurrence: (id: string) => void;
+   222→}
+   223→
+   224→function AttendanceSessionList({
+   225→  academyId,
+   226→  selectedDate,
+   227→  onSelectDate,
+   228→  onSelectOccurrence,
+   229→}: AttendanceSessionListProps) {
+   230→  const [state, setState] = useState<ListState>({ status: "loading" });
+   231→  const academyIdRef = useRef(academyId);
+   232→
+   233→  useEffect(() => {
+   234→    academyIdRef.current = academyId;
+   235→  }, [academyId]);
+   236→
+   237→  // Request-ordering token (stale-response guard). Mirrors the
+   238→  // RegistrationsManagement pattern (Phase B3.3.2).
+   239→  const requestIdRef = useRef(0);
+   240→
+   241→  const fetchList = useCallback(async () => {
+   242→    const aid = academyId;
+   243→    const date = selectedDate;
+   244→    const myRequestId = ++requestIdRef.current;
+   245→    setState({ status: "loading" });
+   246→    try {
+   247→      const url = `/api/admin/occurrences?academyId=${aid}&fromDate=${date}&toDate=${date}`;
+   248→      const res = await fetch(url, { credentials: "same-origin" });
+   249→      const data = (await res.json()) as { occurrences?: OccurrenceListItem[]; error?: { message?: string } };
+   250→      if (myRequestId !== requestIdRef.current) return;
+   251→      if (aid !== academyIdRef.current) return;
+   252→      if (!res.ok || !data.occurrences) {
+   253→        setState({ status: "error", message: data.error?.message ?? `Error ${res.status}` });
+   254→        return;
+   255→      }
+   256→      setState({ status: "success", data: data.occurrences });
+   257→    } catch {
+   258→      if (myRequestId !== requestIdRef.current) return;
+   259→      if (aid !== academyIdRef.current) return;
+   260→      setState({ status: "error", message: "Network error" });
+   261→    }
+   262→  }, [academyId, selectedDate]);
+   263→
+   264→  useEffect(() => {
+   265→    if (!academyId || !selectedDate) return;
+   266→    const myRequestId = ++requestIdRef.current;
+   267→    let cancelled = false;
+   268→    void (async () => {
+   269→      try {
+   270→        const url = `/api/admin/occurrences?academyId=${academyId}&fromDate=${selectedDate}&toDate=${selectedDate}`;
+   271→        const res = await fetch(url, { credentials: "same-origin" });
+   272→        if (cancelled || myRequestId !== requestIdRef.current) return;
+   273→        const data = (await res.json()) as { occurrences?: OccurrenceListItem[]; error?: { message?: string } };
+   274→        if (cancelled || myRequestId !== requestIdRef.current) return;
+   275→        if (!res.ok || !data.occurrences) {
+   276→          setState({ status: "error", message: data.error?.message ?? `Error ${res.status}` });
+   277→          return;
+   278→        }
+   279→        setState({ status: "success", data: data.occurrences });
+   280→      } catch {
+   281→        if (cancelled || myRequestId !== requestIdRef.current) return;
+   282→        setState({ status: "error", message: "Network error" });
+   283→      }
+   284→    })();
+   285→    return () => {
+   286→      cancelled = true;
+   287→    };
+   288→  }, [academyId, selectedDate]);
+   289→
+   290→  const today = jakartaTodayYmd();
+   291→  const isToday = selectedDate === today;
+   292→
+   293→  return (
+   294→    <div className="space-y-4">
+   295→      {/* Header: date picker + today button */}
+   296→      <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+   297→        <div className="space-y-1">
+   298→          <h3 className="text-sm font-medium text-muted-foreground">Attendance</h3>
+   299→          <p className="text-xs text-muted-foreground">
+   300→            Select a date to view scheduled training sessions, then take attendance per session.
+   301→          </p>
+   302→        </div>
+   303→        <div className="flex items-end gap-2">
+   304→          <div className="space-y-1.5">
+   305→            <Label htmlFor="attendance-date" className="text-xs text-muted-foreground">
+   306→              Date
+   307→            </Label>
+   308→            <Input
+   309→              id="attendance-date"
+   310→              type="date"
+   311→              value={selectedDate}
+   312→              onChange={(e) => onSelectDate(e.target.value)}
+   313→              className="w-44"
+   314→            />
+   315→          </div>
+   316→          {!isToday && (
+   317→            <Button variant="outline" size="sm" onClick={() => onSelectDate(today)} className="gap-2">
+   318→              <CalendarDays className="h-4 w-4" aria-hidden /> Today
+   319→            </Button>
+   320→          )}
+   321→          <Button variant="outline" size="sm" onClick={fetchList} className="gap-2">
+   322→            <RefreshCw className="h-4 w-4" aria-hidden /> Refresh
+   323→          </Button>
+   324→        </div>
+   325→      </div>
+   326→
+   327→      {/* Loading state */}
+   328→      {state.status === "loading" && (
+   329→        <Card>
+   330→          <CardContent className="flex items-center gap-3 p-6">
+   331→            <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" aria-hidden />
+   332→            <p className="text-sm text-muted-foreground">Loading sessions for {formatDateLong(selectedDate)}…</p>
+   333→          </CardContent>
+   334→        </Card>
+   335→      )}
+   336→
+   337→      {/* Error state */}
+   338→      {state.status === "error" && (
+   339→        <Card className="border-destructive/30">
+   340→          <CardContent className="p-6">
+   341→            <div className="flex items-start gap-3">
+   342→              <AlertCircle className="h-5 w-5 text-destructive flex-shrink-0 mt-0.5" aria-hidden />
+   343→              <div>
+   344→                <p className="text-sm font-medium text-destructive">Failed to load sessions</p>
+   345→                <p className="mt-1 text-sm text-muted-foreground">{state.message}</p>
+   346→                <Button variant="outline" size="sm" className="mt-3 gap-2" onClick={fetchList}>
+   347→                  <RefreshCw className="h-4 w-4" aria-hidden /> Retry
+   348→                </Button>
+   349→              </div>
+   350→            </div>
+   351→          </CardContent>
+   352→        </Card>
+   353→      )}
+   354→
+   355→      {/* Empty state */}
+   356→      {state.status === "success" && state.data.length === 0 && (
+   357→        <Card>
+   358→          <CardContent className="p-8 text-center">
+   359→            <CalendarDays className="mx-auto h-10 w-10 text-muted-foreground" aria-hidden />
+   360→            <p className="mt-3 text-sm font-medium">No sessions scheduled</p>
+   361→            <p className="mt-1 text-xs text-muted-foreground">
+   362→              There are no training occurrences on {formatDateLong(selectedDate)}.
+   363→              <br />
+   364→              Generate occurrences from the Classes tab first.
+   365→            </p>
+   366→          </CardContent>
+   367→        </Card>
+   368→      )}
+   369→
+   370→      {/* Session list */}
+   371→      {state.status === "success" && state.data.length > 0 && (
+   372→        <div className="space-y-2">
+   373→          <div className="flex items-center justify-between text-xs text-muted-foreground">
+   374→            <span>
+   375→              {state.data.length} session{state.data.length === 1 ? "" : "s"} on{" "}
+   376→              {formatDateLong(selectedDate)}
+   377→            </span>
+   378→          </div>
+   379→          {state.data.map((occ) => {
+   380→            const fullyRecorded =
+   381→              occ.recordedCount > 0 && occ.recordedCount >= occ.capacity ? true : false;
+   382→            return (
+   383→              <Card
+   384→                key={occ.id}
+   385→                className="cursor-pointer transition-all hover:border-primary/40 hover:shadow-sm"
+   386→                onClick={() => onSelectOccurrence(occ.id)}
+   387→              >
+   388→                <CardContent className="flex items-center justify-between p-4">
+   389→                  <div className="flex items-center gap-4">
+   390→                    <div className="flex h-12 w-12 flex-col items-center justify-center rounded-lg bg-primary/5 text-primary">
+   391→                      <span className="text-base font-semibold leading-none">
+   392→                        {formatTime(occ.startAt)}
+   393→                      </span>
+   394→                      <span className="text-[10px] text-muted-foreground">
+   395→                        {formatTime(occ.endAt)}
+   396→                      </span>
+   397→                    </div>
+   398→                    <div>
+   399→                      <p className="font-medium">{occ.className}</p>
+   400→                      <p className="text-sm text-muted-foreground">
+   401→                        Capacity: {occ.capacity}
+   402→                        {occ.recordedCount > 0 && (
+   403→                          <span className="ml-2">
+   404→                            · {occ.recordedCount} recorded
+   405→                          </span>
+   406→                        )}
+   407→                      </p>
+   408→                    </div>
+   409→                  </div>
+   410→                  <div className="flex items-center gap-2">
+   411→                    {occ.status === "cancelled" && (
+   412→                      <Badge variant="destructive">Cancelled</Badge>
+   413→                    )}
+   414→                    {occ.status === "completed" && <Badge>Completed</Badge>}
+   415→                    {occ.status === "planned" && fullyRecorded && (
+   416→                      <Badge variant="secondary" className="bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-400">
+   417→                        All recorded
+   418→                      </Badge>
+   419→                    )}
+   420→                    {occ.status === "planned" && !fullyRecorded && occ.recordedCount > 0 && (
+   421→                      <Badge variant="secondary">{occ.recordedCount}/{occ.capacity}</Badge>
+   422→                    )}
+   423→                    {occ.status === "planned" && occ.recordedCount === 0 && (
+   424→                      <Badge variant="outline">Not started</Badge>
+   425→                    )}
+   426→                    <Button variant="ghost" size="sm" className="text-muted-foreground">
+   427→                      Take attendance →
+   428→                    </Button>
+   429→                  </div>
+   430→                </CardContent>
+   431→              </Card>
+   432→            );
+   433→          })}
+   434→        </div>
+   435→      )}
+   436→    </div>
+   437→  );
+   438→}
+   439→
+   440→// ============================================================================
+   441→// Roster View (per-student attendance)
+   442→// ============================================================================
+   443→
+   444→interface AttendanceRosterProps {
+   445→  occurrenceId: string;
+   446→  academyId: string;
+   447→  onBack: () => void;
+   448→}
+   449→
+   450→interface RosterState {
+   451→  status: "loading" | "error" | "success";
+   452→  message?: string;
+   453→  data?: RosterResponse;
+   454→}
+   455→
+   456→interface StudentDraft {
+   457→  studentId: string;
+   458→  fullName: string;
+   459→  attendanceId: string | null;
+   460→  /** Status the admin has selected in the UI (may differ from server). */
+   461→  selectedStatus: AttendanceStatus | null;
+   462→  notes: string;
+   463→  /** True if the draft has unsaved changes. */
+   464→  dirty: boolean;
+   465→  /** Saving state for this student. */
+   466→  saving: "idle" | "saving" | "saved" | "error";
+   467→  saveError?: string;
+   468→}
+   469→
+   470→export function AttendanceRoster({ occurrenceId, academyId, onBack }: AttendanceRosterProps) {
+   471→  const [state, setState] = useState<RosterState>({ status: "loading" });
+   472→  const [drafts, setDrafts] = useState<Record<string, StudentDraft>>({});
+   473→  const academyIdRef = useRef(academyId);
+   474→  useEffect(() => {
+   475→    academyIdRef.current = academyId;
+   476→  }, [academyId]);
+   477→
+   478→  // Request-ordering token (stale-response guard) for the roster fetch.
+   479→  const rosterRequestIdRef = useRef(0);
+   480→
+   481→  // Fetch the roster + initialize drafts. Pure async function (no setState
+   482→  // called synchronously from an effect — the initial load is wrapped in
+   483→  // an async IIFE inside the effect, matching the existing ClassManagement
+   484→  // pattern in AdminShell).
+   485→  const loadRoster = useCallback(async () => {
+   486→    const aid = academyId;
+   487→    const myRequestId = ++rosterRequestIdRef.current;
+   488→    try {
+   489→      const res = await fetch(
+   490→        `/api/admin/occurrences/${occurrenceId}/roster?academyId=${aid}`,
+   491→        { credentials: "same-origin" },
+   492→      );
+   493→      if (myRequestId !== rosterRequestIdRef.current) return;
+   494→      if (aid !== academyIdRef.current) return;
+   495→      if (!res.ok) {
+   496→        const data = (await res.json()) as { error?: { message?: string } };
+   497→        if (myRequestId !== rosterRequestIdRef.current) return;
+   498→        setState({ status: "error", message: data.error?.message ?? `Error ${res.status}` });
+   499→        return;
+   500→      }
+   501→      const data = (await res.json()) as RosterResponse;
+   502→      if (myRequestId !== rosterRequestIdRef.current) return;
+   503→      // Initialize drafts from the roster.
+   504→      const newDrafts: Record<string, StudentDraft> = {};
+   505→      for (const s of data.roster) {
+   506→        newDrafts[s.student_id] = {
+   507→          studentId: s.student_id,
+   508→          fullName: s.full_name,
+   509→          attendanceId: s.attendance_id,
+   510→          selectedStatus: s.attendance_status,
+   511→          notes: s.notes ?? "",
+   512→          dirty: false,
+   513→          saving: "idle",
+   514→        };
+   515→      }
+   516→      setState({ status: "success", data });
+   517→      setDrafts(newDrafts);
+   518→    } catch {
+   519→      if (myRequestId !== rosterRequestIdRef.current) return;
+   520→      if (aid !== academyIdRef.current) return;
+   521→      setState({ status: "error", message: "Network error" });
+   522→    }
+   523→  }, [occurrenceId, academyId]);
+   524→
+   525→  // Initial load — inline async IIFE (no synchronous setState in the
+   526→  // effect body). The "Discard" button calls `loadRoster` directly to
+   527→  // re-fetch fresh state from the server.
+   528→  useEffect(() => {
+   529→    let cancelled = false;
+   530→    void (async () => {
+   531→      if (cancelled) return;
+   532→      await loadRoster();
+   533→    })();
+   534→    return () => {
+   535→      cancelled = true;
+   536→    };
+   537→  }, [loadRoster]);
+   538→
+   539→  const setStatus = (studentId: string, status: AttendanceStatus) => {
+   540→    setDrafts((prev) => {
+   541→      const d = prev[studentId];
+   542→      if (!d) return prev;
+   543→      if (d.selectedStatus === status && !d.dirty) return prev;
+   544→      return {
+   545→        ...prev,
+   546→        [studentId]: { ...d, selectedStatus: status, dirty: true, saving: "idle", saveError: undefined },
+   547→      };
+   548→    });
+   549→  };
+   550→
+   551→  const setNotes = (studentId: string, notes: string) => {
+   552→    setDrafts((prev) => {
+   553→      const d = prev[studentId];
+   554→      if (!d) return prev;
+   555→      return { ...prev, [studentId]: { ...d, notes, dirty: true, saving: "idle", saveError: undefined } };
+   556→    });
+   557→  };
+   558→
+   559→  const saveStudent = async (studentId: string): Promise<boolean> => {
+   560→    const draft = drafts[studentId];
+   561→    if (!draft || !draft.dirty || draft.saving === "saving") return false;
+   562→
+   563→    setDrafts((prev) => ({
+   564→      ...prev,
+   565→      [studentId]: { ...prev[studentId]!, saving: "saving", saveError: undefined },
+   566→    }));
+   567→
+   568→    try {
+   569→      let res: Response;
+   570→      const body: { studentId: string; status: AttendanceStatus; notes?: string } = {
+   571→        studentId: draft.studentId,
+   572→        status: draft.selectedStatus!,
+   573→      };
+   574→      if (draft.notes.trim()) body.notes = draft.notes.trim();
+   575→
+   576→      if (draft.attendanceId) {
+   577→        // PATCH existing record.
+   578→        const patchBody: { status?: AttendanceStatus; notes?: string | null } = {};
+   579→        if (draft.selectedStatus) patchBody.status = draft.selectedStatus;
+   580→        patchBody.notes = draft.notes.trim() || null;
+   581→        res = await adminFetch(
+   582→          `/api/admin/attendance/${draft.attendanceId}?academyId=${academyId}`,
+   583→          "PATCH",
+   584→          patchBody,
+   585→        );
+   586→      } else {
+   587→        // POST new record.
+   588→        res = await adminFetch(
+   589→          `/api/admin/occurrences/${occurrenceId}/attendance?academyId=${academyId}`,
+   590→          "POST",
+   591→          body,
+   592→        );
+   593→      }
+   594→
+   595→      if (!res.ok) {
+   596→        const data = (await res.json()) as { error?: { message?: string } };
+   597→        const failMsg = data.error?.message ?? `Error ${res.status}`;
+   598→        setDrafts((prev) => ({
+   599→          ...prev,
+   600→          [studentId]: {
+   601→            ...prev[studentId]!,
+   602→            saving: "error",
+   603→            saveError: failMsg,
+   604→          },
+   605→        }));
+   606→        return false;
+   607→      }
+   608→
+   609→      // If this was a POST, capture the new attendanceId.
+   610→      let newAttendanceId = draft.attendanceId;
+   611→      if (!newAttendanceId) {
+   612→        const json = (await res.json()) as { attendanceId?: string };
+   613→        newAttendanceId = json.attendanceId ?? null;
+   614→      }
+   615→
+   616→      setDrafts((prev) => ({
+   617→        ...prev,
+   618→        [studentId]: {
+   619→          ...prev[studentId]!,
+   620→          attendanceId: newAttendanceId,
+   621→          dirty: false,
+   622→          saving: "saved",
+   623→          saveError: undefined,
+   624→        },
+   625→      }));
+   626→
+   627→      // Clear "saved" badge after 1.5s.
+   628→      setTimeout(() => {
+   629→        setDrafts((prev) => {
+   630→          const cur = prev[studentId];
+   631→          if (!cur || cur.saving !== "saved") return prev;
+   632→          return { ...prev, [studentId]: { ...cur, saving: "idle" } };
+   633→        });
+   634→      }, 1500);
+   635→      return true;
+   636→    } catch {
+   637→      setDrafts((prev) => ({
+   638→        ...prev,
+   639→        [studentId]: { ...prev[studentId]!, saving: "error", saveError: "Network error" },
+   640→      }));
+   641→      return false;
+   642→    }
+   643→  };
+   644→
+   645→  const saveAll = async () => {
+   646→    const dirtyIds = Object.values(drafts)
+   647→      .filter((d) => d.dirty && d.selectedStatus !== null)
+   648→      .map((d) => d.studentId);
+   649→    if (dirtyIds.length === 0) return;
+   650→    // Save sequentially to avoid concurrent CSRF/lock contention on the
+   651→    // occurrence row (recordAttendance takes a SERIALIZABLE tx + FOR UPDATE
+   652→    // on the occurrence). Sequential is correct; parallel would race.
+   653→    let ok = 0;
+   654→    let fail = 0;
+   655→    for (const id of dirtyIds) {
+   656→      const success = await saveStudent(id);
+   657→      if (success) ok++; else fail++;
+   658→    }
+   659→    // Single summary toast for the batch (per-student inline badges
+   660→    // still show "saved"/"error" individually).
+   661→    if (fail === 0) {
+   662→      toast({ title: `Attendance saved (${ok} student${ok === 1 ? "" : "s"})` });
+   663→    } else if (ok === 0) {
+   664→      toast({ title: "Failed to save attendance", description: `${fail} student${fail === 1 ? "" : "s"} failed`, variant: "destructive" });
+   665→    } else {
+   666→      toast({ title: "Some attendance saves failed", description: `${ok} saved, ${fail} failed`, variant: "destructive" });
+   667→    }
+   668→  };
+   669→
+   670→  const dirtyCount = Object.values(drafts).filter((d) => d.dirty).length;
+   671→
+   672→  if (state.status === "loading") {
+   673→    return (
+   674→      <Card>
+   675→        <CardContent className="flex items-center gap-3 p-6">
+   676→          <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" aria-hidden />
+   677→          <p className="text-sm text-muted-foreground">Loading roster…</p>
+   678→        </CardContent>
+   679→      </Card>
+   680→    );
+   681→  }
+   682→
+   683→  if (state.status === "error") {
+   684→    return (
+   685→      <Card className="border-destructive/30">
+   686→        <CardContent className="p-6">
+   687→          <div className="flex items-start gap-3">
+   688→            <AlertCircle className="h-5 w-5 text-destructive flex-shrink-0 mt-0.5" aria-hidden />
+   689→            <div>
+   690→              <p className="text-sm font-medium text-destructive">Failed to load roster</p>
+   691→              <p className="mt-1 text-sm text-muted-foreground">{state.message}</p>
+   692→              <Button variant="outline" size="sm" className="mt-3 gap-2" onClick={onBack}>
+   693→                <ArrowLeft className="h-4 w-4" aria-hidden /> Back
+   694→              </Button>
+   695→            </div>
+   696→          </div>
+   697→        </CardContent>
+   698→      </Card>
+   699→    );
+   700→  }
+   701→
+   702→  const data = state.data!;
+   703→  const occ = data.occurrence;
+   704→  const roster = data.roster;
+   705→
+   706→  // Aggregate counts from current drafts (so the header summary updates live).
+   707→  const counts: Record<AttendanceStatus, number> = { present: 0, absent: 0, late: 0, excused: 0 };
+   708→  let unrecorded = 0;
+   709→  for (const s of roster) {
+   710→    const d = drafts[s.student_id];
+   711→    const status = d?.selectedStatus ?? s.attendance_status;
+   712→    if (status) counts[status]++;
+   713→    else unrecorded++;
+   714→  }
+   715→
+   716→  return (
+   717→    <div className="space-y-4">
+   718→      {/* Header */}
+   719→      <div className="flex items-center gap-3">
+   720→        <Button variant="ghost" size="sm" onClick={onBack} className="gap-2">
+   721→          <ArrowLeft className="h-4 w-4" aria-hidden /> Back
+   722→        </Button>
+   723→      </div>
+   724→
+   725→      {/* Occurrence summary card */}
+   726→      <Card>
+   727→        <CardHeader className="pb-3">
+   728→          <div className="flex items-start justify-between gap-2">
+   729→            <div>
+   730→              <CardTitle className="text-lg">
+   731→                {formatDateLong(occ.occurrence_date.slice(0, 10))}
+   732→              </CardTitle>
+   733→              <CardDescription>
+   734→                {formatTime(occ.start_at)} – {formatTime(occ.end_at)} · Capacity {occ.capacity}
+   735→              </CardDescription>
+   736→            </div>
+   737→            <Badge
+   738→              variant={occ.status === "planned" ? "secondary" : "outline"}
+   739→              className="capitalize"
+   740→            >
+   741→              {occ.status}
+   742→            </Badge>
+   743→          </div>
+   744→        </CardHeader>
+   745→        <CardContent>
+   746→          <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
+   747→            <SummaryStat label="Present" value={counts.present} color="emerald" />
+   748→            <SummaryStat label="Late" value={counts.late} color="amber" />
+   749→            <SummaryStat label="Absent" value={counts.absent} color="rose" />
+   750→            <SummaryStat label="Excused" value={counts.excused} color="sky" />
+   751→            <SummaryStat label="Unrecorded" value={unrecorded} color="muted" />
+   752→          </div>
+   753→        </CardContent>
+   754→      </Card>
+   755→
+   756→      {/* Roster */}
+   757→      {roster.length === 0 ? (
+   758→        <Card>
+   759→          <CardContent className="p-8 text-center">
+   760→            <Users className="mx-auto h-10 w-10 text-muted-foreground" aria-hidden />
+   761→            <p className="mt-3 text-sm font-medium">No enrolled students</p>
+   762→            <p className="mt-1 text-xs text-muted-foreground">
+   763→              No students were enrolled in this class on the occurrence date.
+   764→            </p>
+   765→          </CardContent>
+   766→        </Card>
+   767→      ) : (
+   768→        <div className="space-y-2">
+   769→          {roster.map((student) => {
+   770→            const draft = drafts[student.student_id];
+   771→            if (!draft) return null;
+   772→            return (
+   773→              <Card
+   774→                key={student.student_id}
+   775→                className={draft.dirty ? "border-primary/40" : ""}
+   776→              >
+   777→                <CardContent className="p-4">
+   778→                  <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+   779→                    <div className="flex items-start gap-3 sm:min-w-0 sm:flex-1">
+   780→                      <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full bg-primary/10 text-sm font-semibold text-primary">
+   781→                        {draft.fullName.charAt(0).toUpperCase()}
+   782→                      </div>
+   783→                      <div className="min-w-0 flex-1">
+   784→                        <p className="font-medium leading-tight">{draft.fullName}</p>
+   785→                        {draft.attendanceId && (
+   786→                          <p className="mt-0.5 text-xs text-muted-foreground">
+   787→                            Previously: {student.attendance_status ?? "—"}
+   788→                          </p>
+   789→                        )}
+   790→                        <Textarea
+   791→                          value={draft.notes}
+   792→                          onChange={(e) => setNotes(student.student_id, e.target.value)}
+   793→                          placeholder="Notes (optional)…"
+   794→                          className="mt-2 min-h-[44px] resize-y text-sm"
+   795→                          disabled={draft.saving === "saving"}
+   796→                          rows={1}
+   797→                        />
+   798→                      </div>
+   799→                    </div>
+   800→                    <div className="flex flex-col items-stretch gap-2 sm:items-end">
+   801→                      <div className="flex flex-wrap gap-1.5">
+   802→                        {ALL_STATUSES.map((status) => {
+   803→                          const meta = STATUS_META[status];
+   804→                          const Icon = meta.icon;
+   805→                          const isActive = draft.selectedStatus === status;
+   806→                          return (
+   807→                            <Button
+   808→                              key={status}
+   809→                              type="button"
+   810→                              size="sm"
+   811→                              variant="outline"
+   812→                              onClick={() => setStatus(student.student_id, status)}
+   813→                              disabled={draft.saving === "saving"}
+   814→                              className={`gap-1.5 border ${isActive ? meta.active : meta.idle}`}
+   815→                              aria-pressed={isActive}
+   816→                            >
+   817→                              <Icon className="h-3.5 w-3.5" aria-hidden />
+   818→                              <span className="text-xs">{meta.label}</span>
+   819→                            </Button>
+   820→                          );
+   821→                        })}
+   822→                      </div>
+   823→                      <div className="flex items-center gap-2">
+   824→                        {draft.saving === "saving" && (
+   825→                          <span className="flex items-center gap-1 text-xs text-muted-foreground">
+   826→                            <Loader2 className="h-3 w-3 animate-spin" aria-hidden /> Saving…
+   827→                          </span>
+   828→                        )}
+   829→                        {draft.saving === "saved" && (
+   830→                          <span className="flex items-center gap-1 text-xs text-emerald-600 dark:text-emerald-400">
+   831→                            <CheckCircle2 className="h-3 w-3" aria-hidden /> Saved
+   832→                          </span>
+   833→                        )}
+   834→                        {draft.saving === "error" && (
+   835→                          <span className="text-xs text-destructive" title={draft.saveError}>
+   836→                            {draft.saveError ?? "Error"}
+   837→                          </span>
+   838→                        )}
+   839→                        <Button
+   840→                          size="sm"
+   841→                          variant={draft.dirty ? "default" : "outline"}
+   842→                          disabled={!draft.dirty || draft.saving === "saving"}
+   843→                          onClick={async () => {
+   844→                            const success = await saveStudent(student.student_id);
+   845→                            if (success) {
+   846→                              toast({ title: "Attendance saved" });
+   847→                            } else {
+   848→                              toast({ title: "Failed to save attendance", description: "Check the inline error for details", variant: "destructive" });
+   849→                            }
+   850→                          }}
+   851→                          className="gap-1.5"
+   852→                        >
+   853→                          <Save className="h-3.5 w-3.5" aria-hidden /> Save
+   854→                        </Button>
+   855→                      </div>
+   856→                    </div>
+   857→                  </div>
+   858→                </CardContent>
+   859→              </Card>
+   860→            );
+   861→          })}
+   862→        </div>
+   863→      )}
+   864→
+   865→      {/* Sticky save-all bar */}
+   866→      {dirtyCount > 0 && (
+   867→        <div className="sticky bottom-4 z-10">
+   868→          <Card className="border-primary/40 shadow-lg">
+   869→            <CardContent className="flex items-center justify-between p-3">
+   870→              <p className="text-sm text-muted-foreground">
+   871→                <span className="font-medium text-foreground">{dirtyCount}</span> unsaved change
+   872→                {dirtyCount === 1 ? "" : "s"}
+   873→              </p>
+   874→              <div className="flex items-center gap-2">
+   875→                <Button variant="outline" size="sm" onClick={() => void loadRoster()}>
+   876→                  Discard
+   877→                </Button>
+   878→                <Button size="sm" onClick={() => void saveAll()} className="gap-1.5">
+   879→                  <Save className="h-3.5 w-3.5" aria-hidden /> Save all ({dirtyCount})
+   880→                </Button>
+   881→              </div>
+   882→            </CardContent>
+   883→          </Card>
+   884→        </div>
+   885→      )}
+   886→    </div>
+   887→  );
+   888→}
+   889→
+   890→// ============================================================================
+   891→// Summary Stat (small present/late/absent/excused/unrecorded box)
+   892→// ============================================================================
+   893→
+   894→interface SummaryStatProps {
+   895→  label: string;
+   896→  value: number;
+   897→  color: "emerald" | "amber" | "rose" | "sky" | "muted";
+   898→}
+   899→
+   900→function SummaryStat({ label, value, color }: SummaryStatProps) {
+   901→  const colorClasses: Record<SummaryStatProps["color"], string> = {
+   902→    emerald: "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-400",
+   903→    amber: "bg-amber-50 text-amber-700 dark:bg-amber-950/50 dark:text-amber-400",
+   904→    rose: "bg-rose-50 text-rose-700 dark:bg-rose-950/50 dark:text-rose-400",
+   905→    sky: "bg-sky-50 text-sky-700 dark:bg-sky-950/50 dark:text-sky-400",
+   906→    muted: "bg-muted text-muted-foreground",
+   907→  };
+   908→  return (
+   909→    <div className={`rounded-lg p-2.5 text-center ${colorClasses[color]}`}>
+   910→      <p className="text-xl font-semibold leading-none">{value}</p>
+   911→      <p className="mt-1 text-[10px] uppercase tracking-wide">{label}</p>
+   912→    </div>
+   913→  );
+   914→}
+
+[showing lines 1-914 of 915; use offset=915 with limit to continue reading]

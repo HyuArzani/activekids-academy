@@ -1,0 +1,876 @@
+     1→"use client";
+     2→
+     3→import { useState, useRef, useEffect, useCallback } from "react";
+     4→import {
+     5→  ArrowLeft,
+     6→  AlertCircle,
+     7→  Loader2,
+     8→  RefreshCw,
+     9→  CalendarDays,
+    10→  CheckCircle2,
+    11→  XCircle,
+    12→  Clock,
+    13→  UserX,
+    14→  Save,
+    15→  Users,
+    16→} from "lucide-react";
+    17→import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+    18→import { Button } from "@/components/ui/button";
+    19→import { Badge } from "@/components/ui/badge";
+    20→import { Label } from "@/components/ui/label";
+    21→import { Input } from "@/components/ui/input";
+    22→import { Textarea } from "@/components/ui/textarea";
+    23→import { CSRF_HEADER } from "@/lib/auth/csrf";
+    24→
+    25→// ============================================================================
+    26→// Types (match the API responses)
+    27→// ============================================================================
+    28→
+    29→interface OccurrenceListItem {
+    30→  id: string;
+    31→  classId: string;
+    32→  className: string;
+    33→  occurrenceDate: string; // YYYY-MM-DD
+    34→  startAt: string; // YYYY-MM-DDTHH:MM:SSZ (Jakarta wall-clock)
+    35→  endAt: string;
+    36→  status: "planned" | "completed" | "cancelled";
+    37→  capacity: number;
+    38→  cancelledReason: string | null;
+    39→  recordedCount: number;
+    40→}
+    41→
+    42→interface RosterStudent {
+    43→  student_id: string;
+    44→  full_name: string;
+    45→  enrollment_id: string;
+    46→  effective_from: string;
+    47→  effective_to: string | null;
+    48→  attendance_id: string | null;
+    49→  attendance_status: "present" | "absent" | "excused" | "late" | null;
+    50→  notes: string | null;
+    51→}
+    52→
+    53→interface RosterResponse {
+    54→  occurrence: {
+    55→    id: string;
+    56→    class_id: string;
+    57→    occurrence_date: string;
+    58→    start_at: string;
+    59→    end_at: string;
+    60→    status: string;
+    61→    capacity: number;
+    62→  };
+    63→  roster: RosterStudent[];
+    64→}
+    65→
+    66→type AttendanceStatus = "present" | "absent" | "excused" | "late";
+    67→
+    68→type ListState =
+    69→  | { status: "loading" }
+    70→  | { status: "error"; message: string }
+    71→  | { status: "success"; data: OccurrenceListItem[] };
+    72→
+    73→// ============================================================================
+    74→// Helpers
+    75→// ============================================================================
+    76→
+    77→/** Today's date in Asia/Jakarta (UTC+7), as YYYY-MM-DD. */
+    78→function jakartaTodayYmd(): string {
+    79→  const shifted = new Date(Date.now() + 7 * 60 * 60 * 1000);
+    80→  const y = shifted.getUTCFullYear();
+    81→  const m = String(shifted.getUTCMonth() + 1).padStart(2, "0");
+    82→  const d = String(shifted.getUTCDate()).padStart(2, "0");
+    83→  return `${y}-${m}-${d}`;
+    84→}
+    85→
+    86→/**
+    87→ * Format an occurrence's start/end time as Jakarta wall-clock HH:MM.
+    88→ *
+    89→ * Two endpoint shapes exist in this app:
+    90→ *   1. Occurrences listing (`/api/admin/occurrences`): returns
+    91→ *      `to_char(start_at AT TIME ZONE 'Asia/Jakarta', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')`
+    92→ *      → e.g. "2026-10-13T15:00:00Z" (Jakarta wall-clock, literal Z suffix,
+    93→ *      NO milliseconds). The HH:MM is already Jakarta; extract directly.
+    94→ *   2. Roster (`/api/admin/occurrences/:id/roster`): returns the raw
+    95→ *      `start_at` Date which JSON-serializes as UTC ISO, e.g.
+    96→ *      "2026-10-13T08:00:00.000Z" (UTC, WITH milliseconds, Z suffix).
+    97→ *      The HH:MM is UTC; shift +7h to get Jakarta.
+    98→ *
+    99→ * Distinguishing heuristic: if the string contains a milliseconds component
+   100→ * (`.NNNZ`), it's UTC (Date.toJSON output). Otherwise it's the
+   101→ * Jakarta-formatted string from to_char.
+   102→ */
+   103→function formatTime(isoLike: string): string {
+   104→  if (!isoLike) return "?";
+   105→  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(isoLike);
+   106→  if (!m) return "?";
+   107→  // Date.toJSON() output always includes ".NNN" before the Z. The to_char
+   108→  // output never includes milliseconds.
+   109→  const isUtc = /\.\d{3}Z$/.test(isoLike) || /\.\d{3}[+-]\d{2}:\d{2}$/.test(isoLike);
+   110→  if (isUtc) {
+   111→    const d = new Date(isoLike);
+   112→    if (Number.isNaN(d.getTime())) return "?";
+   113→    const shifted = new Date(d.getTime() + 7 * 60 * 60 * 1000);
+   114→    return `${String(shifted.getUTCHours()).padStart(2, "0")}:${String(shifted.getUTCMinutes()).padStart(2, "0")}`;
+   115→  }
+   116→  // Already Jakarta wall-clock (from the listing endpoint's to_char).
+   117→  return `${m[4]}:${m[5]}`;
+   118→}
+   119→
+   120→/** Format "YYYY-MM-DD" → "Weekday, DD Mon YYYY" (Indonesian-ish locale). */
+   121→function formatDateLong(ymd: string): string {
+   122→  const d = new Date(`${ymd}T00:00:00.000Z`);
+   123→  if (Number.isNaN(d.getTime())) return ymd;
+   124→  const weekdays = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+   125→  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+   126→  return `${weekdays[d.getUTCDay()]}, ${String(d.getUTCDate()).padStart(2, "0")} ${months[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
+   127→}
+   128→
+   129→const STATUS_META: Record<
+   130→  AttendanceStatus,
+   131→  { label: string; icon: React.ComponentType<{ className?: string }>; active: string; idle: string }
+   132→> = {
+   133→  present: {
+   134→    label: "Present",
+   135→    icon: CheckCircle2,
+   136→    active: "bg-emerald-600 text-white hover:bg-emerald-700 border-emerald-600",
+   137→    idle: "bg-background text-emerald-700 hover:bg-emerald-50 border-emerald-200 dark:text-emerald-400 dark:hover:bg-emerald-950",
+   138→  },
+   139→  absent: {
+   140→    label: "Absent",
+   141→    icon: XCircle,
+   142→    active: "bg-rose-600 text-white hover:bg-rose-700 border-rose-600",
+   143→    idle: "bg-background text-rose-700 hover:bg-rose-50 border-rose-200 dark:text-rose-400 dark:hover:bg-rose-950",
+   144→  },
+   145→  late: {
+   146→    label: "Late",
+   147→    icon: Clock,
+   148→    active: "bg-amber-500 text-white hover:bg-amber-600 border-amber-500",
+   149→    idle: "bg-background text-amber-700 hover:bg-amber-50 border-amber-200 dark:text-amber-400 dark:hover:bg-amber-950",
+   150→  },
+   151→  excused: {
+   152→    label: "Excused",
+   153→    icon: UserX,
+   154→    active: "bg-sky-600 text-white hover:bg-sky-700 border-sky-600",
+   155→    idle: "bg-background text-sky-700 hover:bg-sky-50 border-sky-200 dark:text-sky-400 dark:hover:bg-sky-950",
+   156→  },
+   157→};
+   158→
+   159→const ALL_STATUSES: AttendanceStatus[] = ["present", "absent", "late", "excused"];
+   160→
+   161→// ============================================================================
+   162→// Shared fetch helper (matches the pattern in AdminShell)
+   163→// ============================================================================
+   164→
+   165→async function adminFetch(url: string, method: string, body?: unknown): Promise<Response> {
+   166→  const csrfMatch = document.cookie.split("; ").find((c) => c.startsWith("futsal_csrf="));
+   167→  const csrfToken = csrfMatch?.split("=")[1] ?? "";
+   168→  return fetch(url, {
+   169→    method,
+   170→    credentials: "same-origin",
+   171→    headers: {
+   172→      "Content-Type": "application/json",
+   173→      [CSRF_HEADER]: csrfToken,
+   174→      ...(body !== undefined ? {} : {}),
+   175→    },
+   176→    body: body !== undefined ? JSON.stringify(body) : undefined,
+   177→  });
+   178→}
+   179→
+   180→// ============================================================================
+   181→// Main Component
+   182→// ============================================================================
+   183→
+   184→interface AttendanceManagementProps {
+   185→  academyId: string;
+   186→}
+   187→
+   188→export function AttendanceManagement({ academyId }: AttendanceManagementProps) {
+   189→  const [selectedDate, setSelectedDate] = useState<string>(jakartaTodayYmd());
+   190→  const [selectedOccurrenceId, setSelectedOccurrenceId] = useState<string | null>(null);
+   191→
+   192→  if (selectedOccurrenceId) {
+   193→    return (
+   194→      <AttendanceRoster
+   195→        occurrenceId={selectedOccurrenceId}
+   196→        academyId={academyId}
+   197→        onBack={() => setSelectedOccurrenceId(null)}
+   198→      />
+   199→    );
+   200→  }
+   201→
+   202→  return (
+   203→    <AttendanceSessionList
+   204→      academyId={academyId}
+   205→      selectedDate={selectedDate}
+   206→      onSelectDate={setSelectedDate}
+   207→      onSelectOccurrence={setSelectedOccurrenceId}
+   208→    />
+   209→  );
+   210→}
+   211→
+   212→// ============================================================================
+   213→// Session List (date picker + today's sessions)
+   214→// ============================================================================
+   215→
+   216→interface AttendanceSessionListProps {
+   217→  academyId: string;
+   218→  selectedDate: string;
+   219→  onSelectDate: (d: string) => void;
+   220→  onSelectOccurrence: (id: string) => void;
+   221→}
+   222→
+   223→function AttendanceSessionList({
+   224→  academyId,
+   225→  selectedDate,
+   226→  onSelectDate,
+   227→  onSelectOccurrence,
+   228→}: AttendanceSessionListProps) {
+   229→  const [state, setState] = useState<ListState>({ status: "loading" });
+   230→  const academyIdRef = useRef(academyId);
+   231→
+   232→  useEffect(() => {
+   233→    academyIdRef.current = academyId;
+   234→  }, [academyId]);
+   235→
+   236→  const fetchList = useCallback(async () => {
+   237→    const aid = academyId;
+   238→    const date = selectedDate;
+   239→    setState({ status: "loading" });
+   240→    try {
+   241→      const url = `/api/admin/occurrences?academyId=${aid}&fromDate=${date}&toDate=${date}`;
+   242→      const res = await fetch(url, { credentials: "same-origin" });
+   243→      const data = (await res.json()) as { occurrences?: OccurrenceListItem[]; error?: { message?: string } };
+   244→      if (aid !== academyIdRef.current) return;
+   245→      if (!res.ok || !data.occurrences) {
+   246→        setState({ status: "error", message: data.error?.message ?? `Error ${res.status}` });
+   247→        return;
+   248→      }
+   249→      setState({ status: "success", data: data.occurrences });
+   250→    } catch {
+   251→      if (aid !== academyIdRef.current) return;
+   252→      setState({ status: "error", message: "Network error" });
+   253→    }
+   254→  }, [academyId, selectedDate]);
+   255→
+   256→  useEffect(() => {
+   257→    if (!academyId || !selectedDate) return;
+   258→    let cancelled = false;
+   259→    void (async () => {
+   260→      try {
+   261→        const url = `/api/admin/occurrences?academyId=${academyId}&fromDate=${selectedDate}&toDate=${selectedDate}`;
+   262→        const res = await fetch(url, { credentials: "same-origin" });
+   263→        if (cancelled) return;
+   264→        const data = (await res.json()) as { occurrences?: OccurrenceListItem[]; error?: { message?: string } };
+   265→        if (cancelled) return;
+   266→        if (!res.ok || !data.occurrences) {
+   267→          setState({ status: "error", message: data.error?.message ?? `Error ${res.status}` });
+   268→          return;
+   269→        }
+   270→        setState({ status: "success", data: data.occurrences });
+   271→      } catch {
+   272→        if (cancelled) return;
+   273→        setState({ status: "error", message: "Network error" });
+   274→      }
+   275→    })();
+   276→    return () => {
+   277→      cancelled = true;
+   278→    };
+   279→  }, [academyId, selectedDate]);
+   280→
+   281→  const today = jakartaTodayYmd();
+   282→  const isToday = selectedDate === today;
+   283→
+   284→  return (
+   285→    <div className="space-y-4">
+   286→      {/* Header: date picker + today button */}
+   287→      <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+   288→        <div className="space-y-1">
+   289→          <h3 className="text-sm font-medium text-muted-foreground">Attendance</h3>
+   290→          <p className="text-xs text-muted-foreground">
+   291→            Select a date to view scheduled training sessions, then take attendance per session.
+   292→          </p>
+   293→        </div>
+   294→        <div className="flex items-end gap-2">
+   295→          <div className="space-y-1.5">
+   296→            <Label htmlFor="attendance-date" className="text-xs text-muted-foreground">
+   297→              Date
+   298→            </Label>
+   299→            <Input
+   300→              id="attendance-date"
+   301→              type="date"
+   302→              value={selectedDate}
+   303→              onChange={(e) => onSelectDate(e.target.value)}
+   304→              className="w-44"
+   305→            />
+   306→          </div>
+   307→          {!isToday && (
+   308→            <Button variant="outline" size="sm" onClick={() => onSelectDate(today)} className="gap-2">
+   309→              <CalendarDays className="h-4 w-4" aria-hidden /> Today
+   310→            </Button>
+   311→          )}
+   312→          <Button variant="outline" size="sm" onClick={fetchList} className="gap-2">
+   313→            <RefreshCw className="h-4 w-4" aria-hidden /> Refresh
+   314→          </Button>
+   315→        </div>
+   316→      </div>
+   317→
+   318→      {/* Loading state */}
+   319→      {state.status === "loading" && (
+   320→        <Card>
+   321→          <CardContent className="flex items-center gap-3 p-6">
+   322→            <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" aria-hidden />
+   323→            <p className="text-sm text-muted-foreground">Loading sessions for {formatDateLong(selectedDate)}…</p>
+   324→          </CardContent>
+   325→        </Card>
+   326→      )}
+   327→
+   328→      {/* Error state */}
+   329→      {state.status === "error" && (
+   330→        <Card className="border-destructive/30">
+   331→          <CardContent className="p-6">
+   332→            <div className="flex items-start gap-3">
+   333→              <AlertCircle className="h-5 w-5 text-destructive flex-shrink-0 mt-0.5" aria-hidden />
+   334→              <div>
+   335→                <p className="text-sm font-medium text-destructive">Failed to load sessions</p>
+   336→                <p className="mt-1 text-sm text-muted-foreground">{state.message}</p>
+   337→                <Button variant="outline" size="sm" className="mt-3 gap-2" onClick={fetchList}>
+   338→                  <RefreshCw className="h-4 w-4" aria-hidden /> Retry
+   339→                </Button>
+   340→              </div>
+   341→            </div>
+   342→          </CardContent>
+   343→        </Card>
+   344→      )}
+   345→
+   346→      {/* Empty state */}
+   347→      {state.status === "success" && state.data.length === 0 && (
+   348→        <Card>
+   349→          <CardContent className="p-8 text-center">
+   350→            <CalendarDays className="mx-auto h-10 w-10 text-muted-foreground" aria-hidden />
+   351→            <p className="mt-3 text-sm font-medium">No sessions scheduled</p>
+   352→            <p className="mt-1 text-xs text-muted-foreground">
+   353→              There are no training occurrences on {formatDateLong(selectedDate)}.
+   354→              <br />
+   355→              Generate occurrences from the Classes tab first.
+   356→            </p>
+   357→          </CardContent>
+   358→        </Card>
+   359→      )}
+   360→
+   361→      {/* Session list */}
+   362→      {state.status === "success" && state.data.length > 0 && (
+   363→        <div className="space-y-2">
+   364→          <div className="flex items-center justify-between text-xs text-muted-foreground">
+   365→            <span>
+   366→              {state.data.length} session{state.data.length === 1 ? "" : "s"} on{" "}
+   367→              {formatDateLong(selectedDate)}
+   368→            </span>
+   369→          </div>
+   370→          {state.data.map((occ) => {
+   371→            const fullyRecorded =
+   372→              occ.recordedCount > 0 && occ.recordedCount >= occ.capacity ? true : false;
+   373→            return (
+   374→              <Card
+   375→                key={occ.id}
+   376→                className="cursor-pointer transition-all hover:border-primary/40 hover:shadow-sm"
+   377→                onClick={() => onSelectOccurrence(occ.id)}
+   378→              >
+   379→                <CardContent className="flex items-center justify-between p-4">
+   380→                  <div className="flex items-center gap-4">
+   381→                    <div className="flex h-12 w-12 flex-col items-center justify-center rounded-lg bg-primary/5 text-primary">
+   382→                      <span className="text-base font-semibold leading-none">
+   383→                        {formatTime(occ.startAt)}
+   384→                      </span>
+   385→                      <span className="text-[10px] text-muted-foreground">
+   386→                        {formatTime(occ.endAt)}
+   387→                      </span>
+   388→                    </div>
+   389→                    <div>
+   390→                      <p className="font-medium">{occ.className}</p>
+   391→                      <p className="text-sm text-muted-foreground">
+   392→                        Capacity: {occ.capacity}
+   393→                        {occ.recordedCount > 0 && (
+   394→                          <span className="ml-2">
+   395→                            · {occ.recordedCount} recorded
+   396→                          </span>
+   397→                        )}
+   398→                      </p>
+   399→                    </div>
+   400→                  </div>
+   401→                  <div className="flex items-center gap-2">
+   402→                    {occ.status === "cancelled" && (
+   403→                      <Badge variant="destructive">Cancelled</Badge>
+   404→                    )}
+   405→                    {occ.status === "completed" && <Badge>Completed</Badge>}
+   406→                    {occ.status === "planned" && fullyRecorded && (
+   407→                      <Badge variant="secondary" className="bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-400">
+   408→                        All recorded
+   409→                      </Badge>
+   410→                    )}
+   411→                    {occ.status === "planned" && !fullyRecorded && occ.recordedCount > 0 && (
+   412→                      <Badge variant="secondary">{occ.recordedCount}/{occ.capacity}</Badge>
+   413→                    )}
+   414→                    {occ.status === "planned" && occ.recordedCount === 0 && (
+   415→                      <Badge variant="outline">Not started</Badge>
+   416→                    )}
+   417→                    <Button variant="ghost" size="sm" className="text-muted-foreground">
+   418→                      Take attendance →
+   419→                    </Button>
+   420→                  </div>
+   421→                </CardContent>
+   422→              </Card>
+   423→            );
+   424→          })}
+   425→        </div>
+   426→      )}
+   427→    </div>
+   428→  );
+   429→}
+   430→
+   431→// ============================================================================
+   432→// Roster View (per-student attendance)
+   433→// ============================================================================
+   434→
+   435→interface AttendanceRosterProps {
+   436→  occurrenceId: string;
+   437→  academyId: string;
+   438→  onBack: () => void;
+   439→}
+   440→
+   441→interface RosterState {
+   442→  status: "loading" | "error" | "success";
+   443→  message?: string;
+   444→  data?: RosterResponse;
+   445→}
+   446→
+   447→interface StudentDraft {
+   448→  studentId: string;
+   449→  fullName: string;
+   450→  attendanceId: string | null;
+   451→  /** Status the admin has selected in the UI (may differ from server). */
+   452→  selectedStatus: AttendanceStatus | null;
+   453→  notes: string;
+   454→  /** True if the draft has unsaved changes. */
+   455→  dirty: boolean;
+   456→  /** Saving state for this student. */
+   457→  saving: "idle" | "saving" | "saved" | "error";
+   458→  saveError?: string;
+   459→}
+   460→
+   461→export function AttendanceRoster({ occurrenceId, academyId, onBack }: AttendanceRosterProps) {
+   462→  const [state, setState] = useState<RosterState>({ status: "loading" });
+   463→  const [drafts, setDrafts] = useState<Record<string, StudentDraft>>({});
+   464→  const academyIdRef = useRef(academyId);
+   465→  useEffect(() => {
+   466→    academyIdRef.current = academyId;
+   467→  }, [academyId]);
+   468→
+   469→  // Fetch the roster + initialize drafts. Pure async function (no setState
+   470→  // called synchronously from an effect — the initial load is wrapped in
+   471→  // an async IIFE inside the effect, matching the existing ClassManagement
+   472→  // pattern in AdminShell).
+   473→  const loadRoster = useCallback(async () => {
+   474→    const aid = academyId;
+   475→    try {
+   476→      const res = await fetch(
+   477→        `/api/admin/occurrences/${occurrenceId}/roster?academyId=${aid}`,
+   478→        { credentials: "same-origin" },
+   479→      );
+   480→      if (aid !== academyIdRef.current) return;
+   481→      if (!res.ok) {
+   482→        const data = (await res.json()) as { error?: { message?: string } };
+   483→        setState({ status: "error", message: data.error?.message ?? `Error ${res.status}` });
+   484→        return;
+   485→      }
+   486→      const data = (await res.json()) as RosterResponse;
+   487→      // Initialize drafts from the roster.
+   488→      const newDrafts: Record<string, StudentDraft> = {};
+   489→      for (const s of data.roster) {
+   490→        newDrafts[s.student_id] = {
+   491→          studentId: s.student_id,
+   492→          fullName: s.full_name,
+   493→          attendanceId: s.attendance_id,
+   494→          selectedStatus: s.attendance_status,
+   495→          notes: s.notes ?? "",
+   496→          dirty: false,
+   497→          saving: "idle",
+   498→        };
+   499→      }
+   500→      setState({ status: "success", data });
+   501→      setDrafts(newDrafts);
+   502→    } catch {
+   503→      if (aid !== academyIdRef.current) return;
+   504→      setState({ status: "error", message: "Network error" });
+   505→    }
+   506→  }, [occurrenceId, academyId]);
+   507→
+   508→  // Initial load — inline async IIFE (no synchronous setState in the
+   509→  // effect body). The "Discard" button calls `loadRoster` directly to
+   510→  // re-fetch fresh state from the server.
+   511→  useEffect(() => {
+   512→    let cancelled = false;
+   513→    void (async () => {
+   514→      if (cancelled) return;
+   515→      await loadRoster();
+   516→    })();
+   517→    return () => {
+   518→      cancelled = true;
+   519→    };
+   520→  }, [loadRoster]);
+   521→
+   522→  const setStatus = (studentId: string, status: AttendanceStatus) => {
+   523→    setDrafts((prev) => {
+   524→      const d = prev[studentId];
+   525→      if (!d) return prev;
+   526→      if (d.selectedStatus === status && !d.dirty) return prev;
+   527→      return {
+   528→        ...prev,
+   529→        [studentId]: { ...d, selectedStatus: status, dirty: true, saving: "idle", saveError: undefined },
+   530→      };
+   531→    });
+   532→  };
+   533→
+   534→  const setNotes = (studentId: string, notes: string) => {
+   535→    setDrafts((prev) => {
+   536→      const d = prev[studentId];
+   537→      if (!d) return prev;
+   538→      return { ...prev, [studentId]: { ...d, notes, dirty: true, saving: "idle", saveError: undefined } };
+   539→    });
+   540→  };
+   541→
+   542→  const saveStudent = async (studentId: string) => {
+   543→    const draft = drafts[studentId];
+   544→    if (!draft || !draft.dirty || draft.saving === "saving") return;
+   545→
+   546→    setDrafts((prev) => ({
+   547→      ...prev,
+   548→      [studentId]: { ...prev[studentId]!, saving: "saving", saveError: undefined },
+   549→    }));
+   550→
+   551→    try {
+   552→      let res: Response;
+   553→      const body: { studentId: string; status: AttendanceStatus; notes?: string } = {
+   554→        studentId: draft.studentId,
+   555→        status: draft.selectedStatus!,
+   556→      };
+   557→      if (draft.notes.trim()) body.notes = draft.notes.trim();
+   558→
+   559→      if (draft.attendanceId) {
+   560→        // PATCH existing record.
+   561→        const patchBody: { status?: AttendanceStatus; notes?: string | null } = {};
+   562→        if (draft.selectedStatus) patchBody.status = draft.selectedStatus;
+   563→        patchBody.notes = draft.notes.trim() || null;
+   564→        res = await adminFetch(
+   565→          `/api/admin/attendance/${draft.attendanceId}?academyId=${academyId}`,
+   566→          "PATCH",
+   567→          patchBody,
+   568→        );
+   569→      } else {
+   570→        // POST new record.
+   571→        res = await adminFetch(
+   572→          `/api/admin/occurrences/${occurrenceId}/attendance?academyId=${academyId}`,
+   573→          "POST",
+   574→          body,
+   575→        );
+   576→      }
+   577→
+   578→      if (!res.ok) {
+   579→        const data = (await res.json()) as { error?: { message?: string } };
+   580→        setDrafts((prev) => ({
+   581→          ...prev,
+   582→          [studentId]: {
+   583→            ...prev[studentId]!,
+   584→            saving: "error",
+   585→            saveError: data.error?.message ?? `Error ${res.status}`,
+   586→          },
+   587→        }));
+   588→        return;
+   589→      }
+   590→
+   591→      // If this was a POST, capture the new attendanceId.
+   592→      let newAttendanceId = draft.attendanceId;
+   593→      if (!newAttendanceId) {
+   594→        const json = (await res.json()) as { attendanceId?: string };
+   595→        newAttendanceId = json.attendanceId ?? null;
+   596→      }
+   597→
+   598→      setDrafts((prev) => ({
+   599→        ...prev,
+   600→        [studentId]: {
+   601→          ...prev[studentId]!,
+   602→          attendanceId: newAttendanceId,
+   603→          dirty: false,
+   604→          saving: "saved",
+   605→          saveError: undefined,
+   606→        },
+   607→      }));
+   608→
+   609→      // Clear "saved" badge after 1.5s.
+   610→      setTimeout(() => {
+   611→        setDrafts((prev) => {
+   612→          const cur = prev[studentId];
+   613→          if (!cur || cur.saving !== "saved") return prev;
+   614→          return { ...prev, [studentId]: { ...cur, saving: "idle" } };
+   615→        });
+   616→      }, 1500);
+   617→    } catch {
+   618→      setDrafts((prev) => ({
+   619→        ...prev,
+   620→        [studentId]: { ...prev[studentId]!, saving: "error", saveError: "Network error" },
+   621→      }));
+   622→    }
+   623→  };
+   624→
+   625→  const saveAll = async () => {
+   626→    const dirtyIds = Object.values(drafts)
+   627→      .filter((d) => d.dirty && d.selectedStatus !== null)
+   628→      .map((d) => d.studentId);
+   629→    if (dirtyIds.length === 0) return;
+   630→    // Save sequentially to avoid concurrent CSRF/lock contention on the
+   631→    // occurrence row (recordAttendance takes a SERIALIZABLE tx + FOR UPDATE
+   632→    // on the occurrence). Sequential is correct; parallel would race.
+   633→    for (const id of dirtyIds) {
+   634→      await saveStudent(id);
+   635→    }
+   636→  };
+   637→
+   638→  const dirtyCount = Object.values(drafts).filter((d) => d.dirty).length;
+   639→
+   640→  if (state.status === "loading") {
+   641→    return (
+   642→      <Card>
+   643→        <CardContent className="flex items-center gap-3 p-6">
+   644→          <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" aria-hidden />
+   645→          <p className="text-sm text-muted-foreground">Loading roster…</p>
+   646→        </CardContent>
+   647→      </Card>
+   648→    );
+   649→  }
+   650→
+   651→  if (state.status === "error") {
+   652→    return (
+   653→      <Card className="border-destructive/30">
+   654→        <CardContent className="p-6">
+   655→          <div className="flex items-start gap-3">
+   656→            <AlertCircle className="h-5 w-5 text-destructive flex-shrink-0 mt-0.5" aria-hidden />
+   657→            <div>
+   658→              <p className="text-sm font-medium text-destructive">Failed to load roster</p>
+   659→              <p className="mt-1 text-sm text-muted-foreground">{state.message}</p>
+   660→              <Button variant="outline" size="sm" className="mt-3 gap-2" onClick={onBack}>
+   661→                <ArrowLeft className="h-4 w-4" aria-hidden /> Back
+   662→              </Button>
+   663→            </div>
+   664→          </div>
+   665→        </CardContent>
+   666→      </Card>
+   667→    );
+   668→  }
+   669→
+   670→  const data = state.data!;
+   671→  const occ = data.occurrence;
+   672→  const roster = data.roster;
+   673→
+   674→  // Aggregate counts from current drafts (so the header summary updates live).
+   675→  const counts: Record<AttendanceStatus, number> = { present: 0, absent: 0, late: 0, excused: 0 };
+   676→  let unrecorded = 0;
+   677→  for (const s of roster) {
+   678→    const d = drafts[s.student_id];
+   679→    const status = d?.selectedStatus ?? s.attendance_status;
+   680→    if (status) counts[status]++;
+   681→    else unrecorded++;
+   682→  }
+   683→
+   684→  return (
+   685→    <div className="space-y-4">
+   686→      {/* Header */}
+   687→      <div className="flex items-center gap-3">
+   688→        <Button variant="ghost" size="sm" onClick={onBack} className="gap-2">
+   689→          <ArrowLeft className="h-4 w-4" aria-hidden /> Back
+   690→        </Button>
+   691→      </div>
+   692→
+   693→      {/* Occurrence summary card */}
+   694→      <Card>
+   695→        <CardHeader className="pb-3">
+   696→          <div className="flex items-start justify-between gap-2">
+   697→            <div>
+   698→              <CardTitle className="text-lg">
+   699→                {formatDateLong(occ.occurrence_date.slice(0, 10))}
+   700→              </CardTitle>
+   701→              <CardDescription>
+   702→                {formatTime(occ.start_at)} – {formatTime(occ.end_at)} · Capacity {occ.capacity}
+   703→              </CardDescription>
+   704→            </div>
+   705→            <Badge
+   706→              variant={occ.status === "planned" ? "secondary" : "outline"}
+   707→              className="capitalize"
+   708→            >
+   709→              {occ.status}
+   710→            </Badge>
+   711→          </div>
+   712→        </CardHeader>
+   713→        <CardContent>
+   714→          <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
+   715→            <SummaryStat label="Present" value={counts.present} color="emerald" />
+   716→            <SummaryStat label="Late" value={counts.late} color="amber" />
+   717→            <SummaryStat label="Absent" value={counts.absent} color="rose" />
+   718→            <SummaryStat label="Excused" value={counts.excused} color="sky" />
+   719→            <SummaryStat label="Unrecorded" value={unrecorded} color="muted" />
+   720→          </div>
+   721→        </CardContent>
+   722→      </Card>
+   723→
+   724→      {/* Roster */}
+   725→      {roster.length === 0 ? (
+   726→        <Card>
+   727→          <CardContent className="p-8 text-center">
+   728→            <Users className="mx-auto h-10 w-10 text-muted-foreground" aria-hidden />
+   729→            <p className="mt-3 text-sm font-medium">No enrolled students</p>
+   730→            <p className="mt-1 text-xs text-muted-foreground">
+   731→              No students were enrolled in this class on the occurrence date.
+   732→            </p>
+   733→          </CardContent>
+   734→        </Card>
+   735→      ) : (
+   736→        <div className="space-y-2">
+   737→          {roster.map((student) => {
+   738→            const draft = drafts[student.student_id];
+   739→            if (!draft) return null;
+   740→            return (
+   741→              <Card
+   742→                key={student.student_id}
+   743→                className={draft.dirty ? "border-primary/40" : ""}
+   744→              >
+   745→                <CardContent className="p-4">
+   746→                  <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+   747→                    <div className="flex items-start gap-3 sm:min-w-0 sm:flex-1">
+   748→                      <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full bg-primary/10 text-sm font-semibold text-primary">
+   749→                        {draft.fullName.charAt(0).toUpperCase()}
+   750→                      </div>
+   751→                      <div className="min-w-0 flex-1">
+   752→                        <p className="font-medium leading-tight">{draft.fullName}</p>
+   753→                        {draft.attendanceId && (
+   754→                          <p className="mt-0.5 text-xs text-muted-foreground">
+   755→                            Previously: {student.attendance_status ?? "—"}
+   756→                          </p>
+   757→                        )}
+   758→                        <Textarea
+   759→                          value={draft.notes}
+   760→                          onChange={(e) => setNotes(student.student_id, e.target.value)}
+   761→                          placeholder="Notes (optional)…"
+   762→                          className="mt-2 min-h-[44px] resize-y text-sm"
+   763→                          disabled={draft.saving === "saving"}
+   764→                          rows={1}
+   765→                        />
+   766→                      </div>
+   767→                    </div>
+   768→                    <div className="flex flex-col items-stretch gap-2 sm:items-end">
+   769→                      <div className="flex flex-wrap gap-1.5">
+   770→                        {ALL_STATUSES.map((status) => {
+   771→                          const meta = STATUS_META[status];
+   772→                          const Icon = meta.icon;
+   773→                          const isActive = draft.selectedStatus === status;
+   774→                          return (
+   775→                            <Button
+   776→                              key={status}
+   777→                              type="button"
+   778→                              size="sm"
+   779→                              variant="outline"
+   780→                              onClick={() => setStatus(student.student_id, status)}
+   781→                              disabled={draft.saving === "saving"}
+   782→                              className={`gap-1.5 border ${isActive ? meta.active : meta.idle}`}
+   783→                              aria-pressed={isActive}
+   784→                            >
+   785→                              <Icon className="h-3.5 w-3.5" aria-hidden />
+   786→                              <span className="text-xs">{meta.label}</span>
+   787→                            </Button>
+   788→                          );
+   789→                        })}
+   790→                      </div>
+   791→                      <div className="flex items-center gap-2">
+   792→                        {draft.saving === "saving" && (
+   793→                          <span className="flex items-center gap-1 text-xs text-muted-foreground">
+   794→                            <Loader2 className="h-3 w-3 animate-spin" aria-hidden /> Saving…
+   795→                          </span>
+   796→                        )}
+   797→                        {draft.saving === "saved" && (
+   798→                          <span className="flex items-center gap-1 text-xs text-emerald-600 dark:text-emerald-400">
+   799→                            <CheckCircle2 className="h-3 w-3" aria-hidden /> Saved
+   800→                          </span>
+   801→                        )}
+   802→                        {draft.saving === "error" && (
+   803→                          <span className="text-xs text-destructive" title={draft.saveError}>
+   804→                            {draft.saveError ?? "Error"}
+   805→                          </span>
+   806→                        )}
+   807→                        <Button
+   808→                          size="sm"
+   809→                          variant={draft.dirty ? "default" : "outline"}
+   810→                          disabled={!draft.dirty || draft.saving === "saving"}
+   811→                          onClick={() => void saveStudent(student.student_id)}
+   812→                          className="gap-1.5"
+   813→                        >
+   814→                          <Save className="h-3.5 w-3.5" aria-hidden /> Save
+   815→                        </Button>
+   816→                      </div>
+   817→                    </div>
+   818→                  </div>
+   819→                </CardContent>
+   820→              </Card>
+   821→            );
+   822→          })}
+   823→        </div>
+   824→      )}
+   825→
+   826→      {/* Sticky save-all bar */}
+   827→      {dirtyCount > 0 && (
+   828→        <div className="sticky bottom-4 z-10">
+   829→          <Card className="border-primary/40 shadow-lg">
+   830→            <CardContent className="flex items-center justify-between p-3">
+   831→              <p className="text-sm text-muted-foreground">
+   832→                <span className="font-medium text-foreground">{dirtyCount}</span> unsaved change
+   833→                {dirtyCount === 1 ? "" : "s"}
+   834→              </p>
+   835→              <div className="flex items-center gap-2">
+   836→                <Button variant="outline" size="sm" onClick={() => void loadRoster()}>
+   837→                  Discard
+   838→                </Button>
+   839→                <Button size="sm" onClick={() => void saveAll()} className="gap-1.5">
+   840→                  <Save className="h-3.5 w-3.5" aria-hidden /> Save all ({dirtyCount})
+   841→                </Button>
+   842→              </div>
+   843→            </CardContent>
+   844→          </Card>
+   845→        </div>
+   846→      )}
+   847→    </div>
+   848→  );
+   849→}
+   850→
+   851→// ============================================================================
+   852→// Summary Stat (small present/late/absent/excused/unrecorded box)
+   853→// ============================================================================
+   854→
+   855→interface SummaryStatProps {
+   856→  label: string;
+   857→  value: number;
+   858→  color: "emerald" | "amber" | "rose" | "sky" | "muted";
+   859→}
+   860→
+   861→function SummaryStat({ label, value, color }: SummaryStatProps) {
+   862→  const colorClasses: Record<SummaryStatProps["color"], string> = {
+   863→    emerald: "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-400",
+   864→    amber: "bg-amber-50 text-amber-700 dark:bg-amber-950/50 dark:text-amber-400",
+   865→    rose: "bg-rose-50 text-rose-700 dark:bg-rose-950/50 dark:text-rose-400",
+   866→    sky: "bg-sky-50 text-sky-700 dark:bg-sky-950/50 dark:text-sky-400",
+   867→    muted: "bg-muted text-muted-foreground",
+   868→  };
+   869→  return (
+   870→    <div className={`rounded-lg p-2.5 text-center ${colorClasses[color]}`}>
+   871→      <p className="text-xl font-semibold leading-none">{value}</p>
+   872→      <p className="mt-1 text-[10px] uppercase tracking-wide">{label}</p>
+   873→    </div>
+   874→  );
+   875→}
+   876→

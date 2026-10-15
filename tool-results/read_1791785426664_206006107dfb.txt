@@ -1,0 +1,756 @@
+     1→     1→/**
+     2→     2→ * Domain: Session entitlement operations.
+     3→     3→ *
+     4→     4→ * Enforces invariants #2–#6, #9:
+     5→     5→ *   #2  original_occurrence_id immutable once set (DB trigger).
+     6→     6→ *   #3  at most one skip per package (domain: SERIALIZABLE + FOR UPDATE + COUNT).
+     7→     7→ *   #4  skip releases occurrence, eligible for makeup (domain).
+     8→     8→ *   #5  makeup doesn't consume skip or duplicate (domain).
+     9→     9→ *   #6  academy-cancel doesn't consume skip (domain).
+    10→    10→ *   #9  admin-correct requires admin role + non-empty reason + audit.
+    11→    11→ *
+    12→    12→ * All operations run in SERIALIZABLE transactions with SELECT FOR UPDATE
+    13→    13→ * on the relevant rows (student_package, training_occurrence).
+    14→    14→ *
+    15→    15→ * Per Decision 1: excused absence does NOT consume skip; it's recorded
+    16→    16→ * distinctly from a student-initiated skip (event_type='excused_absence').
+    17→    17→ *
+    18→    18→ * Per Decision 2: existing occurrences are immutable snapshots. Schedule
+    19→    19→ * changes do NOT rewrite or delete occurrences. Obsolete occurrences are
+    20→    20→ * NOT made available for new bookings (the assignOccurrence function
+    21→    21→ * checks that the occurrence belongs to the CURRENT active schedule
+    22→    22→ * version).
+    23→    23→ *
+    24→    24→ * Per Decision 3: occurrence assignment is a separate explicit, idempotent
+    25→    25→ * operation. Unassigned entitlements (original_occurrence_id = NULL) can
+    26→    26→ * be assigned later.
+    27→    27→ */
+    28→    28→
+    29→    29→import type { DbClient } from "@/lib/db";
+    30→    30→import { getDb } from "@/lib/db";
+    31→    31→import { Err } from "@/lib/errors";
+    32→    32→import { writeAudit } from "@/lib/audit/writer";
+    33→    33→import type { Principal } from "@/lib/auth/principal";
+    34→    34→import { requireRole } from "@/lib/auth/principal";
+    35→    35→import {
+    36→    36→  requireAcademyContext,
+    37→    37→  loadEntitlementInAcademy,
+    38→    38→  loadOccurrenceInAcademy,
+    39→    39→  loadStudentPackageInAcademy,
+    40→    40→  loadActiveScheduleVersion,
+    41→    41→  newId,
+    42→    42→  type EntitlementRow,
+    43→    43→} from "./helpers";
+    44→    44→
+    45→    45→// === Skip (student-initiated, consumes the one-skip allowance) ===========
+    46→    46→
+    47→    47→export interface SkipInput {
+    48→    48→  entitlementId: string;
+    49→    49→  reason?: string;
+    50→    50→}
+    51→    51→
+    52→    52→/**
+    53→    53→ * Skip an entitlement. Consumes the package's one-skip allowance.
+    54→    54→ * Sets status='skipped', assigned_occurrence_id=NULL, skip_used=TRUE.
+    55→    55→ * The entitlement is NOT deleted — it remains eligible for a makeup.
+    56→    56→ *
+    57→    57→ * Invariant #3: at most one skip per package. A second skip for the
+    58→    58→ * same package is rejected with CONFLICT.
+    59→    59→ */
+    60→    60→export async function skipEntitlement(
+    61→    61→  principal: Principal,
+    62→    62→  academyId: string,
+    63→    63→  input: SkipInput,
+    64→    64→  db: DbClient = getDb(),
+    65→    65→): Promise<void> {
+    66→    66→  requireAcademyContext(principal, academyId);
+    67→    67→
+    68→    68→  return db.withTxSerializable(async (tx) => {
+    69→    69→    // Load + lock the entitlement.
+    70→    70→    const entitlement = await loadEntitlementInAcademy(tx, input.entitlementId, academyId);
+    71→    71→
+    72→    72→    if (entitlement.status !== "active") {
+    73→    73→      throw Err.conflict(`Cannot skip: entitlement status is '${entitlement.status}', must be 'active'.`);
+    74→    74→    }
+    75→    75→    if (entitlement.assigned_occurrence_id === null) {
+    76→    76→      throw Err.conflict("Cannot skip: entitlement has no current occurrence assignment to release.");
+    77→    77→    }
+    78→    78→
+    79→    79→    // Load + lock the parent student_package.
+    80→    80→    const pkg = await loadStudentPackageInAcademy(tx, entitlement.student_package_id, academyId);
+    81→    81→    await tx.query(`SELECT id FROM student_packages WHERE id = $1 FOR UPDATE;`, [pkg.id]);
+    82→    82→
+    83→    83→    // Check the one-skip-per-package rule.
+    84→    84→    const skipCountResult = await tx.query<{ c: number }>(
+    85→    85→      `SELECT COUNT(*)::int AS c
+    86→    86→         FROM session_entitlements
+    87→    87→        WHERE student_package_id = $1 AND skip_used = TRUE;`,
+    88→    88→      [pkg.id],
+    89→    89→    );
+    90→    90→    const skipCount = (skipCountResult.rows[0] as { c: number }).c;
+    91→    91→    if (skipCount >= pkg.skip_allowance) {
+    92→    92→      throw Err.conflict(
+    93→    93→        `Skip allowance exceeded (${skipCount}/${pkg.skip_allowance} used). A second skip is not allowed.`,
+    94→    94→      );
+    95→    95→    }
+    96→    96→
+    97→    97→    // Record the before state for the event.
+    98→    98→    const beforeState = {
+    99→    99→      status: entitlement.status,
+   100→   100→      assigned_occurrence_id: entitlement.assigned_occurrence_id,
+   101→   101→      skip_used: entitlement.skip_used,
+   102→   102→    };
+   103→   103→
+   104→   104→    // Apply the skip.
+   105→   105→    await tx.query(
+   106→   106→      `UPDATE session_entitlements
+   107→   107→          SET status = 'skipped',
+   108→   108→              assigned_occurrence_id = NULL,
+   109→   109→              skip_used = TRUE,
+   110→   110→              updated_at = now()
+   111→   111→        WHERE id = $1;`,
+   112→   112→      [entitlement.id],
+   113→   113→    );
+   114→   114→
+   115→   115→    // Write the entitlement event.
+   116→   116→    await tx.query(
+   117→   117→      `INSERT INTO entitlement_events
+   118→   118→         (id, entitlement_id, event_type, occurred_at, actor_user_id, reason, before_state, after_state)
+   119→   119→       VALUES ($1, $2, 'skip_requested', now(), $3, $4, $5::jsonb, $6::jsonb);`,
+   120→   120→      [
+   121→   121→        newId(),
+   122→   122→        entitlement.id,
+   123→   123→        principal.userId,
+   124→   124→        input.reason ?? null,
+   125→   125→        JSON.stringify(beforeState),
+   126→   126→        JSON.stringify({ status: "skipped", assigned_occurrence_id: null, skip_used: true }),
+   127→   127→      ],
+   128→   128→    );
+   129→   129→
+   130→   130→    await writeAudit({
+   131→   131→      tx,
+   132→   132→      academyId,
+   133→   133→      actorUserId: principal.userId,
+   134→   134→      action: "entitlement.skip",
+   135→   135→      targetType: "session_entitlements",
+   136→   136→      targetId: entitlement.id,
+   137→   137→      before: beforeState,
+   138→   138→      after: { status: "skipped", skip_used: true },
+   139→   139→      reason: input.reason,
+   140→   140→    });
+   141→   141→  });
+   142→   142→}
+   143→   143→
+   144→   144→// === Makeup (assigns a new occurrence; does NOT consume skip) =============
+   145→   145→
+   146→   146→export interface AssignMakeupInput {
+   147→   147→  entitlementId: string;
+   148→   148→  newOccurrenceId: string;
+   149→   149→  reason?: string;
+   150→   150→}
+   151→   151→
+   152→   152→/**
+   153→   153→ * Assign a makeup occurrence to a skipped or awaiting-makeup entitlement.
+   154→   154→ * Does NOT consume the skip allowance (the skip was already consumed).
+   155→   155→ * Does NOT duplicate the entitlement (the same entitlement is reused).
+   156→   156→ *
+   157→   157→ * Invariant #5: makeup does not consume another skip or duplicate.
+   158→   158→ *
+   159→   159→ * The occurrence must:
+   160→   160→ *   - Belong to the same academy.
+   161→   161→ *   - Have status='planned' (not cancelled or completed).
+   162→   162→ *   - Belong to the CURRENT active schedule version (not an obsolete
+   163→   163→ *     version — per Decision 2, old future occurrences are NOT available
+   164→   164→ *     for new bookings).
+   165→   165→ *   - Have available capacity (checked via DB trigger + domain logic).
+   166→   166→ */
+   167→   167→export async function assignMakeup(
+   168→   168→  principal: Principal,
+   169→   169→  academyId: string,
+   170→   170→  input: AssignMakeupInput,
+   171→   171→  db: DbClient = getDb(),
+   172→   172→): Promise<void> {
+   173→   173→  requireAcademyContext(principal, academyId);
+   174→   174→
+   175→   175→  return db.withTxSerializable(async (tx) => {
+   176→   176→    const entitlement = await loadEntitlementInAcademy(tx, input.entitlementId, academyId);
+   177→   177→
+   178→   178→    if (entitlement.status !== "skipped" && entitlement.status !== "awaiting_makeup") {
+   179→   179→      throw Err.conflict(
+   180→   180→        `Cannot assign makeup: entitlement status is '${entitlement.status}', must be 'skipped' or 'awaiting_makeup'.`,
+   181→   181→      );
+   182→   182→    }
+   183→   183→
+   184→   184→    // Load + lock the target occurrence.
+   185→   185→    const occ = await loadOccurrenceInAcademy(tx, input.newOccurrenceId, academyId);
+   186→   186→    await tx.query(`SELECT id FROM training_occurrences WHERE id = $1 FOR UPDATE;`, [occ.id]);
+   187→   187→
+   188→   188→    if (occ.status !== "planned") {
+   189→   189→      throw Err.conflict(`Cannot assign makeup: occurrence status is '${occ.status}', must be 'planned'.`);
+   190→   190→    }
+   191→   191→
+   192→   192→    // Per Decision 2: the occurrence must belong to the CURRENT active
+   193→   193→    // schedule version (not an obsolete one).
+   194→   194→    const activeVersion = await loadActiveScheduleVersion(tx, occ.class_id);
+   195→   195→    if (!activeVersion || occ.schedule_version_id !== activeVersion.id) {
+   196→   196→      throw Err.conflict(
+   197→   197→        "Cannot assign makeup: occurrence belongs to an obsolete schedule version. Only occurrences from the current active version are available for new bookings.",
+   198→   198→      );
+   199→   199→    }
+   200→   200→
+   201→   201→    // Capacity check (defense-in-depth; the DB trigger also checks).
+   202→   202→    const capacityResult = await tx.query<{ c: number }>(
+   203→   203→      `SELECT COUNT(*)::int AS c
+   204→   204→         FROM session_entitlements
+   205→   205→        WHERE assigned_occurrence_id = $1 AND status = 'active';`,
+   206→   206→      [occ.id],
+   207→   207→    );
+   208→   208→    const activeCount = (capacityResult.rows[0] as { c: number }).c;
+   209→   209→    if (activeCount >= occ.capacity) {
+   210→   210→      throw Err.conflict(`Occurrence capacity exceeded (${activeCount}/${occ.capacity}).`);
+   211→   211→    }
+   212→   212→
+   213→   213→    const beforeState = {
+   214→   214→      status: entitlement.status,
+   215→   215→      assigned_occurrence_id: entitlement.assigned_occurrence_id,
+   216→   216→    };
+   217→   217→
+   218→   218→    // Determine if this is the initial assignment (original_occurrence_id is NULL).
+   219→   219→    // If so, set original_occurrence_id to the new occurrence (it becomes
+   220→   220→    // immutable after this). The DB trigger allows NULL → value.
+   221→   221→    const setOriginal = entitlement.original_occurrence_id === null;
+   222→   222→
+   223→   223→    await tx.query(
+   224→   224→      `UPDATE session_entitlements
+   225→   225→          SET status = 'active',
+   226→   226→              assigned_occurrence_id = $2${setOriginal ? ", original_occurrence_id = $2" : ""},
+   227→   227→              updated_at = now()
+   228→   228→        WHERE id = $1;`,
+   229→   229→      [entitlement.id, input.newOccurrenceId],
+   230→   230→    );
+   231→   231→
+   232→   232→    await tx.query(
+   233→   233→      `INSERT INTO entitlement_events
+   234→   234→         (id, entitlement_id, event_type, occurred_at, actor_user_id, reason, before_state, after_state)
+   235→   235→       VALUES ($1, $2, 'makeup_assigned', now(), $3, $4, $5::jsonb, $6::jsonb);`,
+   236→   236→      [
+   237→   237→        newId(),
+   238→   238→        entitlement.id,
+   239→   239→        principal.userId,
+   240→   240→        input.reason ?? null,
+   241→   241→        JSON.stringify(beforeState),
+   242→   242→        JSON.stringify({ status: "active", assigned_occurrence_id: input.newOccurrenceId, original_set: setOriginal }),
+   243→   243→      ],
+   244→   244→    );
+   245→   245→
+   246→   246→    await writeAudit({
+   247→   247→      tx,
+   248→   248→      academyId,
+   249→   249→      actorUserId: principal.userId,
+   250→   250→      action: "entitlement.makeup",
+   251→   251→      targetType: "session_entitlements",
+   252→   252→      targetId: entitlement.id,
+   253→   253→      before: beforeState,
+   254→   254→      after: { status: "active", assigned_occurrence_id: input.newOccurrenceId },
+   255→   255→      reason: input.reason,
+   256→   256→    });
+   257→   257→  });
+   258→   258→}
+   259→   259→
+   260→   260→// === Academy-cancel (does NOT consume skip) ===============================
+   261→   261→
+   262→   262→export interface CancelOccurrenceInput {
+   263→   263→  occurrenceId: string;
+   264→   264→  reason: string;
+   265→   265→}
+   266→   266→
+   267→   267→/**
+   268→   268→ * Cancel a training occurrence (academy-initiated). All active entitlements
+   269→   269→ * assigned to this occurrence are set to 'awaiting_makeup' with
+   270→   270→ * assigned_occurrence_id=NULL. skip_used stays FALSE — academy-cancel
+   271→   271→ * does NOT consume the student's skip allowance (invariant #6).
+   272→   272→ *
+   273→   273→ * The reassignment is explicit: the admin must later use `assignMakeup`
+   274→   274→ * to assign each affected entitlement to a new occurrence.
+   275→   275→ */
+   276→   276→export async function cancelOccurrence(
+   277→   277→  principal: Principal,
+   278→   278→  academyId: string,
+   279→   279→  input: CancelOccurrenceInput,
+   280→   280→  db: DbClient = getDb(),
+   281→   281→): Promise<{ affectedEntitlements: number }> {
+   282→   282→  requireAcademyContext(principal, academyId);
+   283→   283→  requireRole(principal, "admin", academyId);
+   284→   284→
+   285→   285→  if (!input.reason || input.reason.trim() === "") {
+   286→   286→    throw Err.validation("A non-empty reason is required for occurrence cancellation.");
+   287→   287→  }
+   288→   288→
+   289→   289→  return db.withTxSerializable(async (tx) => {
+   290→   290→    const occ = await loadOccurrenceInAcademy(tx, input.occurrenceId, academyId);
+   291→   291→    await tx.query(`SELECT id FROM training_occurrences WHERE id = $1 FOR UPDATE;`, [occ.id]);
+   292→   292→
+   293→   293→    if (occ.status === "cancelled") {
+   294→   294→      throw Err.conflict("Occurrence is already cancelled.");
+   295→   295→    }
+   296→   296→
+   297→   297→    // Cancel the occurrence.
+   298→   298→    await tx.query(
+   299→   299→      `UPDATE training_occurrences
+   300→   300→          SET status = 'cancelled', cancelled_at = now(), cancelled_reason = $2, updated_at = now()
+   301→   301→        WHERE id = $1;`,
+   302→   302→      [occ.id, input.reason],
+   303→   303→    );
+   304→   304→
+   305→   305→    // Set all active entitlements assigned to this occurrence to awaiting_makeup.
+   306→   306→    // skip_used stays FALSE — academy-cancel does NOT consume skip.
+   307→   307→    const affectedResult = await tx.query(
+   308→   308→      `UPDATE session_entitlements
+   309→   309→          SET status = 'awaiting_makeup', assigned_occurrence_id = NULL, updated_at = now()
+   310→   310→        WHERE assigned_occurrence_id = $1 AND status = 'active'
+   311→   311→        RETURNING id;`,
+   312→   312→      [occ.id],
+   313→   313→    );
+   314→   314→    const affectedIds = (affectedResult.rows ?? []).map((r) => (r as { id: string }).id);
+   315→   315→
+   316→   316→    // Record events for each affected entitlement.
+   317→   317→    for (const entId of affectedIds) {
+   318→   318→      await tx.query(
+   319→   319→        `INSERT INTO entitlement_events
+   320→   320→           (id, entitlement_id, event_type, occurred_at, actor_user_id, reason, after_state)
+   321→   321→         VALUES ($1, $2, 'cancelled_reassigned', now(), $3, $4, $5::jsonb);`,
+   322→   322→        [
+   323→   323→          newId(),
+   324→   324→          entId,
+   325→   325→          principal.userId,
+   326→   326→          input.reason,
+   327→   327→          JSON.stringify({ status: "awaiting_makeup", assigned_occurrence_id: null, skip_used: false }),
+   328→   328→        ],
+   329→   329→      );
+   330→   330→    }
+   331→   331→
+   332→   332→    await writeAudit({
+   333→   333→      tx,
+   334→   334→      academyId,
+   335→   335→      actorUserId: principal.userId,
+   336→   336→      action: "occurrence.cancel",
+   337→   337→      targetType: "training_occurrences",
+   338→   338→      targetId: occ.id,
+   339→   339→      after: { status: "cancelled", reason: input.reason, affectedEntitlements: affectedIds.length },
+   340→   340→      reason: input.reason,
+   341→   341→    });
+   342→   342→
+   343→   343→    return { affectedEntitlements: affectedIds.length };
+   344→   344→  });
+   345→   345→}
+   346→   346→
+   347→   347→// === Excused absence (does NOT consume skip) ==============================
+   348→   348→
+   349→   349→export interface ExcusedAbsenceInput {
+   350→   350→  entitlementId: string;
+   351→   351→  reason: string;
+   352→   352→}
+   353→   353→
+   354→   354→/**
+   355→   355→ * Record an excused absence for an entitlement. Sets status to
+   356→   356→ * 'awaiting_makeup' with assigned_occurrence_id=NULL. Does NOT consume
+   357→   357→ * the skip allowance (per Decision 1).
+   358→   358→ *
+   359→   359→ * The event is recorded with event_type='excused_absence' (distinct from
+   360→   360→ * 'skip_requested' which is student-initiated and consumes the allowance).
+   361→   361→ */
+   362→   362→export async function excusedAbsence(
+   363→   363→  principal: Principal,
+   364→   364→  academyId: string,
+   365→   365→  input: ExcusedAbsenceInput,
+   366→   366→  db: DbClient = getDb(),
+   367→   367→): Promise<void> {
+   368→   368→  requireAcademyContext(principal, academyId);
+   369→   369→
+   370→   370→  if (!input.reason || input.reason.trim() === "") {
+   371→   371→    throw Err.validation("A non-empty reason is required for an excused absence.");
+   372→   372→  }
+   373→   373→
+   374→   374→  return db.withTxSerializable(async (tx) => {
+   375→   375→    const entitlement = await loadEntitlementInAcademy(tx, input.entitlementId, academyId);
+   376→   376→
+   377→   377→    if (entitlement.status !== "active") {
+   378→   378→      throw Err.conflict(`Cannot record excused absence: entitlement status is '${entitlement.status}', must be 'active'.`);
+   379→   379→    }
+   380→   380→
+   381→   381→    const beforeState = {
+   382→   382→      status: entitlement.status,
+   383→   383→      assigned_occurrence_id: entitlement.assigned_occurrence_id,
+   384→   384→      skip_used: entitlement.skip_used,
+   385→   385→    };
+   386→   386→
+   387→   387→    // Set to awaiting_makeup. skip_used stays FALSE (does NOT consume skip).
+   388→   388→    await tx.query(
+   389→   389→      `UPDATE session_entitlements
+   390→   390→          SET status = 'awaiting_makeup', assigned_occurrence_id = NULL, updated_at = now()
+   391→   391→        WHERE id = $1;`,
+   392→   392→      [entitlement.id],
+   393→   393→    );
+   394→   394→
+   395→   395→    await tx.query(
+   396→   396→      `INSERT INTO entitlement_events
+   397→   397→         (id, entitlement_id, event_type, occurred_at, actor_user_id, reason, before_state, after_state)
+   398→   398→       VALUES ($1, $2, 'excused_absence', now(), $3, $4, $5::jsonb, $6::jsonb);`,
+   399→   399→      [
+   400→   400→        newId(),
+   401→   401→        entitlement.id,
+   402→   402→        principal.userId,
+   403→   403→        input.reason,
+   404→   404→        JSON.stringify(beforeState),
+   405→   405→        JSON.stringify({ status: "awaiting_makeup", assigned_occurrence_id: null, skip_used: false }),
+   406→   406→      ],
+   407→   407→    );
+   408→   408→
+   409→   409→    await writeAudit({
+   410→   410→      tx,
+   411→   411→      academyId,
+   412→   412→      actorUserId: principal.userId,
+   413→   413→      action: "entitlement.excused_absence",
+   414→   414→      targetType: "session_entitlements",
+   415→   415→      targetId: entitlement.id,
+   416→   416→      before: beforeState,
+   417→   417→      after: { status: "awaiting_makeup", skip_used: false },
+   418→   418→      reason: input.reason,
+   419→   419→    });
+   420→   420→  });
+   421→   421→}
+   422→   422→
+   423→   423→// === Admin correct (requires admin role + reason + audit) ================
+   424→   424→
+   425→   425→export interface AdminCorrectInput {
+   426→   426→  entitlementId: string;
+   427→   427→  /** The new occurrence to assign, or null to unassign. */
+   428→   428→  newAssignedOccurrenceId: string | null;
+   429→   429→  reason: string;
+   430→   430→}
+   431→   431→
+   432→   432→/**
+   433→   433→ * Admin-correct an entitlement's assignment. Requires:
+   434→   434→ *   - Principal has admin role in the academy (invariant #9).
+   435→   435→ *   - Non-empty reason (required by DB CHECK + domain check).
+   436→   436→ *   - Audit event in the same transaction.
+   437→   437→ *
+   438→   438→ * Can assign to a new occurrence, or unassign (set to NULL).
+   439→   439→ * The original_occurrence_id is NOT changed (it's immutable once set).
+   440→   440→ */
+   441→   441→export async function adminCorrect(
+   442→   442→  principal: Principal,
+   443→   443→  academyId: string,
+   444→   444→  input: AdminCorrectInput,
+   445→   445→  db: DbClient = getDb(),
+   446→   446→): Promise<void> {
+   447→   447→  requireAcademyContext(principal, academyId);
+   448→   448→  requireRole(principal, "admin", academyId);
+   449→   449→
+   450→   450→  if (!input.reason || input.reason.trim() === "") {
+   451→   451→    throw Err.validation("A non-empty reason is required for admin corrections.");
+   452→   452→  }
+   453→   453→
+   454→   454→  return db.withTxSerializable(async (tx) => {
+   455→   455→    const entitlement = await loadEntitlementInAcademy(tx, input.entitlementId, academyId);
+   456→   456→    // Lock the entitlement row.
+   457→   457→    await tx.query(`SELECT id FROM session_entitlements WHERE id = $1 FOR UPDATE;`, [entitlement.id]);
+   458→   458→
+   459→   459→    const beforeState = {
+   460→   460→      status: entitlement.status,
+   461→   461→      assigned_occurrence_id: entitlement.assigned_occurrence_id,
+   462→   462→    };
+   463→   463→
+   464→   464→    if (input.newAssignedOccurrenceId !== null) {
+   465→   465→      // Validate the new occurrence.
+   466→   466→      const occ = await loadOccurrenceInAcademy(tx, input.newAssignedOccurrenceId, academyId);
+   467→   467→      await tx.query(`SELECT id FROM training_occurrences WHERE id = $1 FOR UPDATE;`, [occ.id]);
+   468→   468→
+   469→   469→      if (occ.status === "cancelled") {
+   470→   470→        throw Err.conflict("Cannot assign to a cancelled occurrence.");
+   471→   471→      }
+   472→   472→
+   473→   473→      // Capacity check (the DB trigger also checks).
+   474→   474→      const capacityResult = await tx.query<{ c: number }>(
+   475→   475→        `SELECT COUNT(*)::int AS c
+   476→   476→           FROM session_entitlements
+   477→   477→          WHERE assigned_occurrence_id = $1 AND status = 'active' AND id <> $2;`,
+   478→   478→        [occ.id, entitlement.id],
+   479→   479→      );
+   480→   480→      const activeCount = (capacityResult.rows[0] as { c: number }).c;
+   481→   481→      if (activeCount + 1 > occ.capacity) {
+   482→   482→        throw Err.conflict(`Occurrence capacity exceeded (${activeCount + 1}/${occ.capacity}).`);
+   483→   483→      }
+   484→   484→    }
+   485→   485→
+   486→   486→    // Apply the correction. If this is the first assignment (original is NULL),
+   487→   487→    // set original_occurrence_id too (it becomes immutable).
+   488→   488→    const setOriginal =
+   489→   489→      input.newAssignedOccurrenceId !== null && entitlement.original_occurrence_id === null;
+   490→   490→
+   491→   491→    await tx.query(
+   492→   492→      `UPDATE session_entitlements
+   493→   493→          SET assigned_occurrence_id = $2${setOriginal ? ", original_occurrence_id = $2" : ""},
+   494→   494→              updated_at = now()
+   495→   495→        WHERE id = $1;`,
+   496→   496→      [entitlement.id, input.newAssignedOccurrenceId],
+   497→   497→    );
+   498→   498→
+   499→   499→    // Record the admin-corrected event (reason is REQUIRED — DB CHECK enforces).
+   500→   500→    await tx.query(
+   501→   501→      `INSERT INTO entitlement_events
+   502→   502→         (id, entitlement_id, event_type, occurred_at, actor_user_id, reason, before_state, after_state)
+   503→   503→       VALUES ($1, $2, 'admin_corrected', now(), $3, $4, $5::jsonb, $6::jsonb);`,
+   504→   504→      [
+   505→   505→        newId(),
+   506→   506→        entitlement.id,
+   507→   507→        principal.userId,
+   508→   508→        input.reason,
+   509→   509→        JSON.stringify(beforeState),
+   510→   510→        JSON.stringify({ assigned_occurrence_id: input.newAssignedOccurrenceId, original_set: setOriginal }),
+   511→   511→      ],
+   512→   512→    );
+   513→   513→
+   514→   514→    await writeAudit({
+   515→   515→      tx,
+   516→   516→      academyId,
+   517→   517→      actorUserId: principal.userId,
+   518→   518→      action: "entitlement.admin_correct",
+   519→   519→      targetType: "session_entitlements",
+   520→   520→      targetId: entitlement.id,
+   521→   521→      before: beforeState,
+   522→   522→      after: { assigned_occurrence_id: input.newAssignedOccurrenceId },
+   523→   523→      reason: input.reason,
+   524→   524→    });
+   525→   525→  });
+   526→   526→}
+   527→   527→
+   528→   528→// === Occurrence assignment (explicit, idempotent) ========================
+   529→   529→
+   530→   530→export interface AssignOccurrenceInput {
+   531→   531→  entitlementId: string;
+   532→   532→  occurrenceId: string;
+   533→   533→}
+   534→   534→
+   535→   535→/**
+   536→   536→ * Assign an occurrence to an unassigned entitlement. This is the explicit,
+   537→   537→ * idempotent operation for occurrence assignment (separate from package
+   538→   538→ * purchase per Decision 3).
+   539→   539→ *
+   540→   540→ * The entitlement must currently be unassigned (original_occurrence_id IS
+   541→   541→ * NULL). If the entitlement already has an occurrence, this is a no-op
+   542→   542→ * (idempotent) if the occurrence is the same, or a conflict if different.
+   543→   543→ */
+   544→   544→export async function assignOccurrence(
+   545→   545→  principal: Principal,
+   546→   546→  academyId: string,
+   547→   547→  input: AssignOccurrenceInput,
+   548→   548→  db: DbClient = getDb(),
+   549→   549→): Promise<void> {
+   550→   550→  requireAcademyContext(principal, academyId);
+   551→   551→
+   552→   552→  return db.withTxSerializable(async (tx) => {
+   553→   553→    const entitlement = await loadEntitlementInAcademy(tx, input.entitlementId, academyId);
+   554→   554→    await tx.query(`SELECT id FROM session_entitlements WHERE id = $1 FOR UPDATE;`, [entitlement.id]);
+   555→   555→
+   556→   556→    // Idempotent: if already assigned to the same occurrence, no-op.
+   557→   557→    if (entitlement.assigned_occurrence_id === input.occurrenceId) {
+   558→   558→      return; // idempotent success
+   559→   559→    }
+   560→   560→
+   561→   561→    // If already assigned to a DIFFERENT occurrence, reject (use adminCorrect).
+   562→   562→    if (entitlement.assigned_occurrence_id !== null) {
+   563→   563→      throw Err.conflict(
+   564→   564→        "Entitlement is already assigned to a different occurrence. Use adminCorrect to reassign.",
+   565→   565→      );
+   566→   566→    }
+   567→   567→
+   568→   568→    if (entitlement.status !== "active") {
+   569→   569→      throw Err.conflict(`Cannot assign occurrence: entitlement status is '${entitlement.status}', must be 'active'.`);
+   570→   570→    }
+   571→   571→
+   572→   572→    const occ = await loadOccurrenceInAcademy(tx, input.occurrenceId, academyId);
+   573→   573→    await tx.query(`SELECT id FROM training_occurrences WHERE id = $1 FOR UPDATE;`, [occ.id]);
+   574→   574→
+   575→   575→    if (occ.status !== "planned") {
+   576→   576→      throw Err.conflict(`Cannot assign: occurrence status is '${occ.status}', must be 'planned'.`);
+   577→   577→    }
+   578→   578→
+   579→   579→    // Per Decision 2: occurrence must belong to the CURRENT active version.
+   580→   580→    const activeVersion = await loadActiveScheduleVersion(tx, occ.class_id);
+   581→   581→    if (!activeVersion || occ.schedule_version_id !== activeVersion.id) {
+   582→   582→      throw Err.conflict("Occurrence belongs to an obsolete schedule version. Not available for new bookings.");
+   583→   583→    }
+   584→   584→
+   585→   585→    // Capacity check.
+   586→   586→    const capacityResult = await tx.query<{ c: number }>(
+   587→   587→      `SELECT COUNT(*)::int AS c
+   588→   588→         FROM session_entitlements
+   589→   589→        WHERE assigned_occurrence_id = $1 AND status = 'active' AND id <> $2;`,
+   590→   590→      [occ.id, entitlement.id],
+   591→   591→    );
+   592→   592→    const activeCount = (capacityResult.rows[0] as { c: number }).c;
+   593→   593→    if (activeCount + 1 > occ.capacity) {
+   594→   594→      throw Err.conflict(`Occurrence capacity exceeded (${activeCount + 1}/${occ.capacity}).`);
+   595→   595→    }
+   596→   596→
+   597→   597→    // This is the initial assignment — set both original_occurrence_id
+   598→   598→    // (immutable after this) and assigned_occurrence_id.
+   599→   599→    await tx.query(
+   600→   600→      `UPDATE session_entitlements
+   601→   601→          SET original_occurrence_id = $2,
+   602→   602→              assigned_occurrence_id = $2,
+   603→   603→              updated_at = now()
+   604→   604→        WHERE id = $1;`,
+   605→   605→      [entitlement.id, input.occurrenceId],
+   606→   606→    );
+   607→   607→
+   608→   608→    await tx.query(
+   609→   609→      `INSERT INTO entitlement_events
+   610→   610→         (id, entitlement_id, event_type, occurred_at, actor_user_id, reason)
+   611→   611→       VALUES ($1, $2, 'occurrence_assigned', now(), $3, 'Initial occurrence assignment');`,
+   612→   612→      [newId(), entitlement.id, principal.userId],
+   613→   613→    );
+   614→   614→
+   615→   615→    await writeAudit({
+   616→   616→      tx,
+   617→   617→      academyId,
+   618→   618→      actorUserId: principal.userId,
+   619→   619→      action: "entitlement.assign_occurrence",
+   620→   620→      targetType: "session_entitlements",
+   621→   621→      targetId: entitlement.id,
+   622→   622→      after: { original_occurrence_id: input.occurrenceId, assigned_occurrence_id: input.occurrenceId },
+   623→   623→    });
+   624→   624→  });
+   625→   625→}
+   626→   626→
+   627→   627→// === List entitlement events (history) ===================================
+   628→   628→
+   629→   629→export interface EntitlementEventRow {
+   630→   630→  id: string;
+   631→   631→  event_type: string;
+   632→   632→  occurred_at: Date;
+   633→   633→  actor_user_id: string | null;
+   634→   634→  reason: string | null;
+   635→   635→  before_state: string | null;
+   636→   636→  after_state: string | null;
+   637→   637→}
+   638→   638→
+   639→   639→export async function listEntitlementEvents(
+   640→   640→  principal: Principal,
+   641→   641→  academyId: string,
+   642→   642→  entitlementId: string,
+   643→   643→  db: DbClient = getDb(),
+   644→   644→): Promise<EntitlementEventRow[]> {
+   645→   645→  requireAcademyContext(principal, academyId);
+   646→   646→  // Verify the entitlement is in this academy (via package → student → academy).
+   647→   647→  await loadEntitlementInAcademy(db, entitlementId, academyId);
+   648→   648→
+   649→   649→  const result = await db.query<EntitlementEventRow>(
+   650→   650→    `SELECT ee.id, ee.event_type, ee.occurred_at, ee.actor_user_id,
+   651→   651→            ee.reason, ee.before_state::text, ee.after_state::text
+   652→   652→       FROM entitlement_events ee
+   653→   653→      WHERE ee.entitlement_id = $1
+   654→   654→      ORDER BY ee.occurred_at ASC;`,
+   655→   655→    [entitlementId],
+   656→   656→  );
+   657→   657→  return result.rows as EntitlementEventRow[];
+   658→   658→}
+   659→   659→
+   660→   660→// === Bulk-assign unassigned entitlements (recovery) ====================
+   661→   661→
+   662→   662→export interface AssignUnassignedResult {
+   663→   663→  assigned: number;
+   664→   664→  stillUnassigned: number;
+   665→   665→  details: { entitlementId: string; occurrenceId: string }[];
+   666→   666→}
+   667→   667→
+   668→   668→/**
+   669→   669→ * Attempt to assign all unassigned entitlements in a package to eligible
+   670→   670→ * future training occurrences. Assignments are made in sequence order.
+   671→   671→ * Entitlements that cannot be assigned (no eligible occurrence, capacity
+   672→   672→ * full, etc.) remain unassigned and visible.
+   673→   673→ *
+   674→   674→ * Each assignment is an explicit call to `assignOccurrence`, so all
+   675→   675→ * existing invariants (academy scoping, version check, capacity, FOR
+   676→   676→ * UPDATE) are preserved.
+   677→   677→ */
+   678→   678→export async function assignUnassignedEntitlements(
+   679→   679→  principal: Principal,
+   680→   680→  academyId: string,
+   681→   681→  packageId: string,
+   682→   682→  db: DbClient = getDb(),
+   683→   683→): Promise<AssignUnassignedResult> {
+   684→   684→  requireAcademyContext(principal, academyId);
+   685→   685→
+   686→   686→  // Load the package (academy-scoped).
+   687→   687→  const pkg = await loadStudentPackageInAcademy(db, packageId, academyId);
+   688→   688→
+   689→   689→  // Find all unassigned entitlements (original_occurrence_id IS NULL,
+   690→   690→  // assigned_occurrence_id IS NULL, status='active') in sequence order.
+   691→   691→  const unassignedResult = await db.query<{ id: string }>(
+   692→   692→    `SELECT e.id
+   693→   693→       FROM session_entitlements e
+   694→   694→      WHERE e.student_package_id = $1
+   695→   695→        AND e.original_occurrence_id IS NULL
+   696→   696→        AND e.assigned_occurrence_id IS NULL
+   697→   697→        AND e.status = 'active'
+   698→   698→      ORDER BY e.sequence;`,
+   699→   699→    [pkg.id],
+   700→   700→  );
+   701→   701→  const unassignedIds = (unassignedResult.rows as { id: string }[]).map((r) => r.id);
+   702→   702→
+   703→   703→  let assigned = 0;
+   704→   704→  const details: { entitlementId: string; occurrenceId: string }[] = [];
+   705→   705→
+   706→   706→  for (const entitlementId of unassignedIds) {
+   707→   707→    // Find the next eligible occurrence: same academy, same class (as
+   708→   708→    // class_id_at_purchase), status='planned', from the current active
+   709→   709→    // schedule version, not already at capacity, date >= today.
+   710→   710→    const eligibleResult = await db.query<{ id: string }>(
+   711→   711→      `SELECT tocc.id
+   712→   712→         FROM training_occurrences tocc
+   713→   713→         JOIN schedule_versions sv ON sv.id = tocc.schedule_version_id
+   714→   714→        WHERE tocc.academy_id = $1
+   715→   715→          AND tocc.class_id = $2
+   716→   716→          AND tocc.status = 'planned'
+   717→   717→          AND tocc.occurrence_date >= CURRENT_DATE
+   718→   718→          AND sv.status = 'active'
+   719→   719→          AND sv.effective_to IS NULL
+   720→   720→          AND tocc.capacity > (
+   721→   721→            SELECT COUNT(*) FROM session_entitlements
+   722→   722→             WHERE assigned_occurrence_id = tocc.id AND status = 'active'
+   723→   723→          )
+   724→   724→        ORDER BY tocc.occurrence_date, tocc.start_at
+   725→   725→        LIMIT 1;`,
+   726→   726→      [academyId, pkg.class_id_at_purchase],
+   727→   727→    );
+   728→   728→
+   729→   729→    const eligibleOcc = (eligibleResult.rows[0] as { id: string } | undefined);
+   730→   730→
+   731→   731→    if (!eligibleOcc) {
+   732→   732→      // No eligible occurrence — leave unassigned, move to next entitlement.
+   733→   733→      continue;
+   734→   734→    }
+   735→   735→
+   736→   736→    try {
+   737→   737→      await assignOccurrence(principal, academyId, {
+   738→   738→        entitlementId,
+   739→   739→        occurrenceId: eligibleOcc.id,
+   740→   740→      }, db);
+   741→   741→      assigned++;
+   742→   742→      details.push({ entitlementId, occurrenceId: eligibleOcc.id });
+   743→   743→    } catch {
+   744→   744→      // Assignment failed (e.g., capacity filled by a concurrent
+   745→   745→      // assignment, or occurrence no longer eligible). Leave unassigned.
+   746→   746→      continue;
+   747→   747→    }
+   748→   748→  }
+   749→   749→
+   750→   750→  return {
+   751→   751→    assigned,
+   752→   752→    stillUnassigned: unassignedIds.length - assigned,
+   753→   753→    details,
+   754→   754→  };
+   755→   755→}
+   756→   756→

@@ -1,0 +1,1032 @@
+     1→"use client";
+     2→
+     3→import { useState, useRef, useEffect, useCallback } from "react";
+     4→import {
+     5→  FileText,
+     6→  AlertCircle,
+     7→  Loader2,
+     8→  RefreshCw,
+     9→  Users,
+    10→  ClipboardCheck,
+    11→  Wallet,
+    12→  TrendingUp,
+    13→  TrendingDown,
+    14→  Calendar,
+    15→  Download,
+    16→  CheckCircle2,
+    17→  XCircle,
+    18→  Clock,
+    19→  UserX,
+    20→} from "lucide-react";
+    21→import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+    22→import { Button } from "@/components/ui/button";
+    23→import { Badge } from "@/components/ui/badge";
+    24→import { Label } from "@/components/ui/label";
+    25→import { Input } from "@/components/ui/input";
+    26→import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+    27→import {
+    28→  Table,
+    29→  TableBody,
+    30→  TableCell,
+    31→  TableHead,
+    32→  TableHeader,
+    33→  TableRow,
+    34→} from "@/components/ui/table";
+    35→
+    36→// ============================================================================
+    37→// Types
+    38→// ============================================================================
+    39→
+    40→interface StudentRosterEntry {
+    41→  studentId: string;
+    42→  fullName: string;
+    43→  dateOfBirth: Date | string | null;
+    44→  gender: string | null;
+    45→  archivedAt: Date | string | null;
+    46→  currentClassName: string | null;
+    47→  currentClassId: string | null;
+    48→  packageCount: number;
+    49→  activeEntitlements: number;
+    50→  completedEntitlements: number;
+    51→  awaitingMakeupEntitlements: number;
+    52→  lastAttendedDate: string | null;
+    53→  lastAttendedStatus: string | null;
+    54→}
+    55→
+    56→interface StudentRosterReport {
+    57→  students: StudentRosterEntry[];
+    58→  totalStudents: number;
+    59→  activeStudents: number;
+    60→  archivedStudents: number;
+    61→}
+    62→
+    63→interface AttendanceReportEntry {
+    64→  attendanceId: string;
+    65→  occurrenceDate: string;
+    66→  className: string;
+    67→  startAt: string;
+    68→  status: string;
+    69→  notes: string | null;
+    70→  recordedAt: string;
+    71→}
+    72→
+    73→interface AttendanceReportSummary {
+    74→  total: number;
+    75→  present: number;
+    76→  absent: number;
+    77→  excused: number;
+    78→  late: number;
+    79→  attendanceRate: number;
+    80→}
+    81→
+    82→interface PerStudentAttendanceReport {
+    83→  studentId: string;
+    84→  studentName: string;
+    85→  records: AttendanceReportEntry[];
+    86→  summary: AttendanceReportSummary;
+    87→}
+    88→
+    89→interface FinanceReportPayment {
+    90→  paymentId: string;
+    91→  studentName: string;
+    92→  amount: string;
+    93→  paymentDate: string;
+    94→  paymentMethod: string;
+    95→  status: string;
+    96→  packageName: string | null;
+    97→}
+    98→
+    99→interface FinanceReportExpense {
+   100→  expenseId: string;
+   101→  amount: string;
+   102→  category: string;
+   103→  incurredOn: string;
+   104→  note: string | null;
+   105→}
+   106→
+   107→interface FinanceReportSummary {
+   108→  totalIncome: string;
+   109→  totalExpenses: string;
+   110→  net: string;
+   111→  paymentCount: number;
+   112→  expenseCount: number;
+   113→  byMethod: { method: string; count: number; total: string }[];
+   114→  byCategory: { category: string; count: number; total: string }[];
+   115→}
+   116→
+   117→interface MonthlyFinanceReport {
+   118→  fromDate: string;
+   119→  toDate: string;
+   120→  payments: FinanceReportPayment[];
+   121→  expenses: FinanceReportExpense[];
+   122→  summary: FinanceReportSummary;
+   123→}
+   124→
+   125→interface Student {
+   126→  id: string;
+   127→  full_name: string;
+   128→}
+   129→
+   130→type SubSection = "students" | "attendance" | "finance";
+   131→
+   132→type LoadingState = "loading" | "error" | "success";
+   133→
+   134→// ============================================================================
+   135→// Helpers
+   136→// ============================================================================
+   137→
+   138→function jakartaTodayYmd(): string {
+   139→  const shifted = new Date(Date.now() + 7 * 60 * 60 * 1000);
+   140→  const y = shifted.getUTCFullYear();
+   141→  const m = String(shifted.getUTCMonth() + 1).padStart(2, "0");
+   142→  const d = String(shifted.getUTCDate()).padStart(2, "0");
+   143→  return `${y}-${m}-${d}`;
+   144→}
+   145→
+   146→function jakartaMonthStart(): string {
+   147→  const shifted = new Date(Date.now() + 7 * 60 * 60 * 1000);
+   148→  const y = shifted.getUTCFullYear();
+   149→  const m = String(shifted.getUTCMonth() + 1).padStart(2, "0");
+   150→  return `${y}-${m}-01`;
+   151→}
+   152→
+   153→function formatRupiah(amountStr: string): string {
+   154→  const n = Number(amountStr);
+   155→  if (Number.isNaN(n)) return `Rp ${amountStr}`;
+   156→  return `Rp ${n.toLocaleString("id-ID", { maximumFractionDigits: 0 })}`;
+   157→}
+   158→
+   159→function formatDate(ymd: string | null): string {
+   160→  if (!ymd) return "—";
+   161→  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(ymd);
+   162→  if (!m) return ymd;
+   163→  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+   164→  const monthIdx = parseInt(m[2]!, 10) - 1;
+   165→  return `${m[3]} ${months[monthIdx] ?? "???"} ${m[1]}`;
+   166→}
+   167→
+   168→const STATUS_META: Record<string, { label: string; icon: React.ComponentType<{ className?: string }>; color: string }> = {
+   169→  present: { label: "Present", icon: CheckCircle2, color: "bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-400" },
+   170→  absent: { label: "Absent", icon: XCircle, color: "bg-rose-100 text-rose-700 dark:bg-rose-950 dark:text-rose-400" },
+   171→  late: { label: "Late", icon: Clock, color: "bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-400" },
+   172→  excused: { label: "Excused", icon: UserX, color: "bg-sky-100 text-sky-700 dark:bg-sky-950 dark:text-sky-400" },
+   173→};
+   174→
+   175→// ============================================================================
+   176→// Main component
+   177→// ============================================================================
+   178→
+   179→export function ReportsManagement({ academyId }: { academyId: string }) {
+   180→  const [sub, setSub] = useState<SubSection>("students");
+   181→
+   182→  const subTabs: { id: SubSection; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
+   183→    { id: "students", label: "Student Roster", icon: Users },
+   184→    { id: "attendance", label: "Attendance", icon: ClipboardCheck },
+   185→    { id: "finance", label: "Financial", icon: Wallet },
+   186→  ];
+   187→
+   188→  return (
+   189→    <div className="space-y-4">
+   190→      {/* Header */}
+   191→      <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+   192→        <div className="space-y-1">
+   193→          <h3 className="text-sm font-medium text-muted-foreground">Reports</h3>
+   194→          <p className="text-xs text-muted-foreground">
+   195→            View academy-wide reports: student roster, per-student attendance, and monthly financial summaries.
+   196→          </p>
+   197→        </div>
+   198→      </div>
+   199→
+   200→      {/* Sub-tab navigation */}
+   201→      <div className="flex gap-1 overflow-x-auto rounded-lg bg-muted p-1" role="tablist" aria-label="Report types">
+   202→        {subTabs.map((tab) => {
+   203→          const Icon = tab.icon;
+   204→          return (
+   205→            <button
+   206→              key={tab.id}
+   207→              type="button"
+   208→              role="tab"
+   209→              aria-selected={sub === tab.id}
+   210→              onClick={() => setSub(tab.id)}
+   211→              className={`flex items-center gap-2 rounded-md px-3 py-1.5 text-sm font-medium transition-colors whitespace-nowrap ${
+   212→                sub === tab.id
+   213→                  ? "bg-background text-foreground shadow-sm"
+   214→                  : "text-muted-foreground hover:text-foreground"
+   215→              }`}
+   216→            >
+   217→              <Icon className="h-4 w-4" aria-hidden /> {tab.label}
+   218→            </button>
+   219→          );
+   220→        })}
+   221→      </div>
+   222→
+   223→      {/* Sub-section content */}
+   224→      {sub === "students" && <StudentRosterReport academyId={academyId} />}
+   225→      {sub === "attendance" && <AttendanceReport academyId={academyId} />}
+   226→      {sub === "finance" && <FinanceReport academyId={academyId} />}
+   227→    </div>
+   228→  );
+   229→}
+   230→
+   231→// ============================================================================
+   232→// Student Roster Report
+   233→// ============================================================================
+   234→
+   235→function StudentRosterReport({ academyId }: { academyId: string }) {
+   236→  const [state, setState] = useState<{ status: LoadingState; data?: StudentRosterReport; error?: string }>({ status: "loading" });
+   237→  const [search, setSearch] = useState("");
+   238→  const academyIdRef = useRef(academyId);
+   239→  useEffect(() => {
+   240→    academyIdRef.current = academyId;
+   241→  }, [academyId]);
+   242→
+   243→  // Request-ordering token: incremented on each fetchReport/effect-fetch
+   244→  // call. Before applying a response, check if this token still matches
+   245→  // the latest value. If a newer request has started, the stale response
+   246→  // is discarded. This prevents an older (slower) request from
+   247→  // overwriting newer data — e.g., a post-mutation refetch racing a
+   248→  // date-range change, or a manual Refresh racing the deps-change fetch.
+   249→  // Mirrors the RegistrationsManagement pattern (Phase B3.3.2).
+   250→  const requestIdRef = useRef(0);
+   251→
+   252→  const fetchReport = useCallback(async () => {
+   253→    const aid = academyId;
+   254→    const myRequestId = ++requestIdRef.current;
+   255→    setState({ status: "loading" });
+   256→    try {
+   257→      const res = await fetch(`/api/admin/reports/students?academyId=${aid}`, { credentials: "same-origin" });
+   258→      if (myRequestId !== requestIdRef.current) return;
+   259→      if (aid !== academyIdRef.current) return;
+   260→      if (!res.ok) {
+   261→        const data = (await res.json()) as { error?: { message?: string } };
+   262→        setState({ status: "error", error: data.error?.message ?? `Error ${res.status}` });
+   263→        return;
+   264→      }
+   265→      const data = (await res.json()) as StudentRosterReport;
+   266→      setState({ status: "success", data });
+   267→    } catch {
+   268→      if (myRequestId !== requestIdRef.current) return;
+   269→      if (aid !== academyIdRef.current) return;
+   270→      setState({ status: "error", error: "Network error" });
+   271→    }
+   272→  }, [academyId]);
+   273→
+   274→  useEffect(() => {
+   275→    if (!academyId) return;
+   276→    let cancelled = false;
+   277→    const myRequestId = ++requestIdRef.current;
+   278→    void (async () => {
+   279→      try {
+   280→        const res = await fetch(`/api/admin/reports/students?academyId=${academyId}`, { credentials: "same-origin" });
+   281→        if (cancelled || myRequestId !== requestIdRef.current) return;
+   282→        if (!res.ok) {
+   283→          const data = (await res.json()) as { error?: { message?: string } };
+   284→          setState({ status: "error", error: data.error?.message ?? `Error ${res.status}` });
+   285→          return;
+   286→        }
+   287→        const data = (await res.json()) as StudentRosterReport;
+   288→        if (cancelled || myRequestId !== requestIdRef.current) return;
+   289→        setState({ status: "success", data });
+   290→      } catch {
+   291→        if (cancelled || myRequestId !== requestIdRef.current) return;
+   292→        setState({ status: "error", error: "Network error" });
+   293→      }
+   294→    })();
+   295→    return () => { cancelled = true; };
+   296→  }, [academyId]);
+   297→
+   298→  const filteredStudents = state.data?.students.filter((s) =>
+   299→    s.fullName.toLowerCase().includes(search.toLowerCase()),
+   300→  ) ?? [];
+   301→
+   302→  if (state.status === "loading") return <LoadingCard text="Loading student roster…" />;
+   303→  if (state.status === "error") return <ErrorCard message={state.error!} onRetry={fetchReport} />;
+   304→
+   305→  return (
+   306→    <div className="space-y-4">
+   307→      {/* Summary cards */}
+   308→      <div className="grid gap-3 sm:grid-cols-3">
+   309→        <SummaryCard label="Total Students" value={state.data!.totalStudents} icon={Users} color="primary" />
+   310→        <SummaryCard label="Active" value={state.data!.activeStudents} icon={CheckCircle2} color="emerald" />
+   311→        <SummaryCard label="Archived" value={state.data!.archivedStudents} icon={XCircle} color="muted" />
+   312→      </div>
+   313→
+   314→      {/* Search + refresh + export */}
+   315→      <div className="flex items-center gap-2">
+   316→        <Input
+   317→          placeholder="Search students…"
+   318→          value={search}
+   319→          onChange={(e) => setSearch(e.target.value)}
+   320→          className="max-w-xs"
+   321→        />
+   322→        <Button variant="outline" size="sm" onClick={fetchReport} className="gap-2">
+   323→          <RefreshCw className="h-4 w-4" aria-hidden /> Refresh
+   324→        </Button>
+   325→        <Button
+   326→          variant="outline"
+   327→          size="sm"
+   328→          onClick={() => downloadStudentRosterCSV(filteredStudents)}
+   329→          disabled={filteredStudents.length === 0}
+   330→          className="gap-2"
+   331→        >
+   332→          <Download className="h-4 w-4" aria-hidden /> CSV
+   333→        </Button>
+   334→      </div>
+   335→
+   336→      {/* Table */}
+   337→      {filteredStudents.length === 0 ? (
+   338→        <Card>
+   339→          <CardContent className="p-8 text-center">
+   340→            <Users className="mx-auto h-10 w-10 text-muted-foreground" aria-hidden />
+   341→            <p className="mt-3 text-sm font-medium">{search ? "No matching students" : "No students yet"}</p>
+   342→          </CardContent>
+   343→        </Card>
+   344→      ) : (
+   345→        <Card>
+   346→          <CardContent className="p-0">
+   347→            <div className="max-h-[600px] overflow-auto">
+   348→              <Table>
+   349→                <TableHeader>
+   350→                  <TableRow>
+   351→                    <TableHead>Student</TableHead>
+   352→                    <TableHead>Class</TableHead>
+   353→                    <TableHead className="text-center">Packages</TableHead>
+   354→                    <TableHead className="text-center">Active</TableHead>
+   355→                    <TableHead className="text-center">Completed</TableHead>
+   356→                    <TableHead className="text-center">Makeup</TableHead>
+   357→                    <TableHead>Last Attendance</TableHead>
+   358→                  </TableRow>
+   359→                </TableHeader>
+   360→                <TableBody>
+   361→                  {filteredStudents.map((s) => (
+   362→                    <TableRow key={s.studentId}>
+   363→                      <TableCell>
+   364→                        <div className="flex items-center gap-2">
+   365→                          <div className="flex h-7 w-7 items-center justify-center rounded-full bg-primary/10 text-xs font-semibold text-primary">
+   366→                            {s.fullName.charAt(0).toUpperCase()}
+   367→                          </div>
+   368→                          <div>
+   369→                            <p className="font-medium">{s.fullName}</p>
+   370→                            {s.archivedAt && <Badge variant="outline" className="text-xs">Archived</Badge>}
+   371→                          </div>
+   372→                        </div>
+   373→                      </TableCell>
+   374→                      <TableCell>{s.currentClassName ?? "—"}</TableCell>
+   375→                      <TableCell className="text-center">{s.packageCount}</TableCell>
+   376→                      <TableCell className="text-center">
+   377→                        {s.activeEntitlements > 0 ? (
+   378→                          <Badge variant="secondary">{s.activeEntitlements}</Badge>
+   379→                        ) : "—"}
+   380→                      </TableCell>
+   381→                      <TableCell className="text-center">
+   382→                        {s.completedEntitlements > 0 ? (
+   383→                          <Badge variant="secondary">{s.completedEntitlements}</Badge>
+   384→                        ) : "—"}
+   385→                      </TableCell>
+   386→                      <TableCell className="text-center">
+   387→                        {s.awaitingMakeupEntitlements > 0 ? (
+   388→                          <Badge className="bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-400">
+   389→                            {s.awaitingMakeupEntitlements}
+   390→                          </Badge>
+   391→                        ) : "—"}
+   392→                      </TableCell>
+   393→                      <TableCell>
+   394→                        {s.lastAttendedDate ? (
+   395→                          <div className="flex items-center gap-1.5">
+   396→                            <span className="text-xs">{formatDate(s.lastAttendedDate)}</span>
+   397→                            {s.lastAttendedStatus && STATUS_META[s.lastAttendedStatus] && (
+   398→                              <Badge variant="outline" className={`text-xs ${STATUS_META[s.lastAttendedStatus]!.color}`}>
+   399→                                {STATUS_META[s.lastAttendedStatus]!.label}
+   400→                              </Badge>
+   401→                            )}
+   402→                          </div>
+   403→                        ) : "—"}
+   404→                      </TableCell>
+   405→                    </TableRow>
+   406→                  ))}
+   407→                </TableBody>
+   408→              </Table>
+   409→            </div>
+   410→          </CardContent>
+   411→        </Card>
+   412→      )}
+   413→    </div>
+   414→  );
+   415→}
+   416→
+   417→// ============================================================================
+   418→// Attendance Report
+   419→// ============================================================================
+   420→
+   421→function AttendanceReport({ academyId }: { academyId: string }) {
+   422→  const [students, setStudents] = useState<Student[]>([]);
+   423→  const [selectedStudentId, setSelectedStudentId] = useState("");
+   424→  const [report, setReport] = useState<PerStudentAttendanceReport | null>(null);
+   425→  const [loading, setLoading] = useState(false);
+   426→  const [error, setError] = useState<string | null>(null);
+   427→  const academyIdRef = useRef(academyId);
+   428→  useEffect(() => {
+   429→    academyIdRef.current = academyId;
+   430→  }, [academyId]);
+   431→
+   432→  // Request-ordering token: incremented on each fetchReport/effect-fetch
+   433→  // call. Before applying a response, check if this token still matches
+   434→  // the latest value. If a newer request has started, the stale response
+   435→  // is discarded. This prevents an older (slower) request from
+   436→  // overwriting newer data — e.g., a post-mutation refetch racing a
+   437→  // date-range change, or a manual Refresh racing the deps-change fetch.
+   438→  // Mirrors the RegistrationsManagement pattern (Phase B3.3.2).
+   439→  //
+   440→  // Note: this component's report-fetch useEffect (below) delegates to
+   441→  // fetchReport directly (`void fetchReport()`) rather than duplicating
+   442→  // the fetch logic in an IIFE — so only the useCallback needs the guard.
+   443→  // The students-list useEffect IIFE below fetches a DIFFERENT resource
+   444→  // (/api/admin/students) and does not race with fetchReport, so it is
+   445→  // left unchanged.
+   446→  const requestIdRef = useRef(0);
+   447→
+   448→  // Load students list.
+   449→  useEffect(() => {
+   450→    if (!academyId) return;
+   451→    let cancelled = false;
+   452→    void (async () => {
+   453→      try {
+   454→        const res = await fetch(`/api/admin/students?academyId=${academyId}`, { credentials: "same-origin" });
+   455→        if (cancelled) return;
+   456→        const data = (await res.json()) as { students?: Student[] };
+   457→        if (cancelled) return;
+   458→        setStudents(data.students ?? []);
+   459→      } catch {
+   460→        // ignore
+   461→      }
+   462→    })();
+   463→    return () => { cancelled = true; };
+   464→  }, [academyId]);
+   465→
+   466→  const fetchReport = useCallback(async () => {
+   467→    if (!selectedStudentId) return;
+   468→    const aid = academyId;
+   469→    const myRequestId = ++requestIdRef.current;
+   470→    setLoading(true);
+   471→    setError(null);
+   472→    try {
+   473→      const res = await fetch(
+   474→        `/api/admin/reports/attendance?academyId=${aid}&studentId=${selectedStudentId}`,
+   475→        { credentials: "same-origin" },
+   476→      );
+   477→      if (myRequestId !== requestIdRef.current) return;
+   478→      if (aid !== academyIdRef.current) return;
+   479→      if (!res.ok) {
+   480→        const data = (await res.json()) as { error?: { message?: string } };
+   481→        setError(data.error?.message ?? `Error ${res.status}`);
+   482→        return;
+   483→      }
+   484→      const data = (await res.json()) as PerStudentAttendanceReport;
+   485→      setReport(data);
+   486→    } catch {
+   487→      if (myRequestId !== requestIdRef.current) return;
+   488→      if (aid !== academyIdRef.current) return;
+   489→      setError("Network error");
+   490→    } finally {
+   491→      setLoading(false);
+   492→    }
+   493→  }, [academyId, selectedStudentId]);
+   494→
+   495→  useEffect(() => {
+   496→    if (selectedStudentId) void fetchReport();
+   497→    else setReport(null);
+   498→  }, [fetchReport, selectedStudentId]);
+   499→
+   500→  return (
+   501→    <div className="space-y-4">
+   502→      {/* Student selector */}
+   503→      <Card>
+   504→        <CardContent className="p-4">
+   505→          <div className="flex items-end gap-3">
+   506→            <div className="flex-1 space-y-2">
+   507→              <Label htmlFor="report-student">Select Student</Label>
+   508→              <Select value={selectedStudentId} onValueChange={setSelectedStudentId}>
+   509→                <SelectTrigger id="report-student">
+   510→                  <SelectValue placeholder="Choose a student…" />
+   511→                </SelectTrigger>
+   512→                <SelectContent>
+   513→                  {students.map((s) => (
+   514→                    <SelectItem key={s.id} value={s.id}>
+   515→                      {s.full_name}
+   516→                    </SelectItem>
+   517→                  ))}
+   518→                </SelectContent>
+   519→              </Select>
+   520→            </div>
+   521→            <Button variant="outline" size="sm" onClick={fetchReport} disabled={!selectedStudentId || loading} className="gap-2">
+   522→              {loading ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <RefreshCw className="h-4 w-4" aria-hidden />}
+   523→              Refresh
+   524→            </Button>
+   525→          </div>
+   526→        </CardContent>
+   527→      </Card>
+   528→
+   529→      {!selectedStudentId && (
+   530→        <Card>
+   531→          <CardContent className="p-8 text-center">
+   532→            <ClipboardCheck className="mx-auto h-10 w-10 text-muted-foreground" aria-hidden />
+   533→            <p className="mt-3 text-sm font-medium">Select a student to view their attendance report</p>
+   534→          </CardContent>
+   535→        </Card>
+   536→      )}
+   537→
+   538→      {error && <ErrorCard message={error} onRetry={fetchReport} />}
+   539→
+   540→      {report && (
+   541→        <>
+   542→          {/* Summary cards */}
+   543→          <div className="grid gap-3 sm:grid-cols-3 lg:grid-cols-6">
+   544→            <SummaryCard label="Total" value={report.summary.total} icon={Calendar} color="primary" />
+   545→            <SummaryCard label="Present" value={report.summary.present} icon={CheckCircle2} color="emerald" />
+   546→            <SummaryCard label="Late" value={report.summary.late} icon={Clock} color="amber" />
+   547→            <SummaryCard label="Absent" value={report.summary.absent} icon={XCircle} color="rose" />
+   548→            <SummaryCard label="Excused" value={report.summary.excused} icon={UserX} color="sky" />
+   549→            <SummaryCard label="Rate" value={`${report.summary.attendanceRate}%`} icon={TrendingUp} color={report.summary.attendanceRate >= 75 ? "emerald" : "rose"} />
+   550→          </div>
+   551→
+   552→          {/* Attendance history table */}
+   553→          <Card>
+   554→            <CardHeader>
+   555→              <CardTitle className="text-base">Attendance History — {report.studentName}</CardTitle>
+   556→            </CardHeader>
+   557→            <CardContent className="p-0">
+   558→              {report.records.length === 0 ? (
+   559→                <p className="p-6 text-center text-sm text-muted-foreground">No attendance records yet.</p>
+   560→              ) : (
+   561→                <div className="max-h-[500px] overflow-auto">
+   562→                  <Table>
+   563→                    <TableHeader>
+   564→                      <TableRow>
+   565→                        <TableHead>Date</TableHead>
+   566→                        <TableHead>Class</TableHead>
+   567→                        <TableHead>Status</TableHead>
+   568→                        <TableHead>Notes</TableHead>
+   569→                      </TableRow>
+   570→                    </TableHeader>
+   571→                    <TableBody>
+   572→                      {report.records.map((r) => (
+   573→                        <TableRow key={r.attendanceId}>
+   574→                          <TableCell className="font-medium">{formatDate(r.occurrenceDate)}</TableCell>
+   575→                          <TableCell>{r.className}</TableCell>
+   576→                          <TableCell>
+   577→                            {STATUS_META[r.status] && (
+   578→                              <Badge variant="outline" className={STATUS_META[r.status]!.color}>
+   579→                                {STATUS_META[r.status]!.label}
+   580→                              </Badge>
+   581→                            )}
+   582→                          </TableCell>
+   583→                          <TableCell className="text-sm text-muted-foreground">{r.notes ?? "—"}</TableCell>
+   584→                        </TableRow>
+   585→                      ))}
+   586→                    </TableBody>
+   587→                  </Table>
+   588→                </div>
+   589→              )}
+   590→            </CardContent>
+   591→          </Card>
+   592→        </>
+   593→      )}
+   594→    </div>
+   595→  );
+   596→}
+   597→
+   598→// ============================================================================
+   599→// Finance Report
+   600→// ============================================================================
+   601→
+   602→function FinanceReport({ academyId }: { academyId: string }) {
+   603→  const [fromDate, setFromDate] = useState(jakartaMonthStart());
+   604→  const [toDate, setToDate] = useState(jakartaTodayYmd());
+   605→  const [report, setReport] = useState<MonthlyFinanceReport | null>(null);
+   606→  const [loading, setLoading] = useState(false);
+   607→  const [error, setError] = useState<string | null>(null);
+   608→  const academyIdRef = useRef(academyId);
+   609→  useEffect(() => {
+   610→    academyIdRef.current = academyId;
+   611→  }, [academyId]);
+   612→
+   613→  // Request-ordering token: incremented on each fetchReport/effect-fetch
+   614→  // call. Before applying a response, check if this token still matches
+   615→  // the latest value. If a newer request has started, the stale response
+   616→  // is discarded. This prevents an older (slower) request from
+   617→  // overwriting newer data — e.g., a post-mutation refetch racing a
+   618→  // date-range change, or a manual Refresh racing the deps-change fetch.
+   619→  // Mirrors the RegistrationsManagement pattern (Phase B3.3.2).
+   620→  const requestIdRef = useRef(0);
+   621→
+   622→  const fetchReport = useCallback(async () => {
+   623→    const aid = academyId;
+   624→    const myRequestId = ++requestIdRef.current;
+   625→    setLoading(true);
+   626→    setError(null);
+   627→    try {
+   628→      const res = await fetch(
+   629→        `/api/admin/reports/finance?academyId=${aid}&fromDate=${fromDate}&toDate=${toDate}`,
+   630→        { credentials: "same-origin" },
+   631→      );
+   632→      if (myRequestId !== requestIdRef.current) return;
+   633→      if (aid !== academyIdRef.current) return;
+   634→      if (!res.ok) {
+   635→        const data = (await res.json()) as { error?: { message?: string } };
+   636→        setError(data.error?.message ?? `Error ${res.status}`);
+   637→        return;
+   638→      }
+   639→      const data = (await res.json()) as MonthlyFinanceReport;
+   640→      setReport(data);
+   641→    } catch {
+   642→      if (myRequestId !== requestIdRef.current) return;
+   643→      if (aid !== academyIdRef.current) return;
+   644→      setError("Network error");
+   645→    } finally {
+   646→      setLoading(false);
+   647→    }
+   648→  }, [academyId, fromDate, toDate]);
+   649→
+   650→  useEffect(() => {
+   651→    if (!academyId || !fromDate || !toDate) return;
+   652→    let cancelled = false;
+   653→    const myRequestId = ++requestIdRef.current;
+   654→    void (async () => {
+   655→      setLoading(true);
+   656→      setError(null);
+   657→      try {
+   658→        const res = await fetch(
+   659→          `/api/admin/reports/finance?academyId=${academyId}&fromDate=${fromDate}&toDate=${toDate}`,
+   660→          { credentials: "same-origin" },
+   661→        );
+   662→        if (cancelled || myRequestId !== requestIdRef.current) return;
+   663→        if (!res.ok) {
+   664→          const data = (await res.json()) as { error?: { message?: string } };
+   665→          setError(data.error?.message ?? `Error ${res.status}`);
+   666→          return;
+   667→        }
+   668→        const data = (await res.json()) as MonthlyFinanceReport;
+   669→        if (cancelled || myRequestId !== requestIdRef.current) return;
+   670→        setReport(data);
+   671→      } catch {
+   672→        if (cancelled || myRequestId !== requestIdRef.current) return;
+   673→        setError("Network error");
+   674→      } finally {
+   675→        if (!cancelled) setLoading(false);
+   676→      }
+   677→    })();
+   678→    return () => { cancelled = true; };
+   679→  }, [academyId, fromDate, toDate]);
+   680→
+   681→  if (loading && !report) return <LoadingCard text="Loading financial report…" />;
+   682→  if (error && !report) return <ErrorCard message={error} onRetry={fetchReport} />;
+   683→
+   684→  return (
+   685→    <div className="space-y-4">
+   686→      {/* Date range selector */}
+   687→      <Card>
+   688→        <CardContent className="flex items-end gap-3 p-4">
+   689→          <div className="space-y-1.5">
+   690→            <Label htmlFor="finance-from" className="text-xs text-muted-foreground">From</Label>
+   691→            <Input id="finance-from" type="date" value={fromDate} onChange={(e) => setFromDate(e.target.value)} className="w-36" />
+   692→          </div>
+   693→          <div className="space-y-1.5">
+   694→            <Label htmlFor="finance-to" className="text-xs text-muted-foreground">To</Label>
+   695→            <Input id="finance-to" type="date" value={toDate} onChange={(e) => setToDate(e.target.value)} className="w-36" />
+   696→          </div>
+   697→          <Button variant="outline" size="sm" onClick={fetchReport} disabled={loading} className="gap-2">
+   698→            {loading ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <RefreshCw className="h-4 w-4" aria-hidden />}
+   699→            Refresh
+   700→          </Button>
+   701→          {report && (
+   702→            <Button
+   703→              variant="outline"
+   704→              size="sm"
+   705→              onClick={() => downloadFinanceCSV(report.payments, report.expenses, fromDate, toDate)}
+   706→              disabled={report.payments.length === 0 && report.expenses.length === 0}
+   707→              className="gap-2"
+   708→            >
+   709→              <Download className="h-4 w-4" aria-hidden /> CSV
+   710→            </Button>
+   711→          )}
+   712→        </CardContent>
+   713→      </Card>
+   714→
+   715→      {report && (
+   716→        <>
+   717→          {/* Summary cards */}
+   718→          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+   719→            <SummaryCard
+   720→              label="Income"
+   721→              value={formatRupiah(report.summary.totalIncome)}
+   722→              icon={TrendingUp}
+   723→              color="emerald"
+   724→              subtitle={`${report.summary.paymentCount} payment(s)`}
+   725→            />
+   726→            <SummaryCard
+   727→              label="Expenses"
+   728→              value={formatRupiah(report.summary.totalExpenses)}
+   729→              icon={TrendingDown}
+   730→              color="rose"
+   731→              subtitle={`${report.summary.expenseCount} expense(s)`}
+   732→            />
+   733→            <SummaryCard
+   734→              label="Net"
+   735→              value={formatRupiah(report.summary.net)}
+   736→              icon={Wallet}
+   737→              color={Number(report.summary.net) >= 0 ? "emerald" : "rose"}
+   738→              subtitle={Number(report.summary.net) >= 0 ? "Surplus" : "Deficit"}
+   739→            />
+   740→            <SummaryCard
+   741→              label="Period"
+   742→              value={`${formatDate(report.fromDate).slice(0, 6)}→${formatDate(report.toDate).slice(0, 6)}`}
+   743→              icon={Calendar}
+   744→              color="primary"
+   745→              subtitle={report.fromDate === report.toDate ? "1 day" : `${Math.round((new Date(report.toDate).getTime() - new Date(report.fromDate).getTime()) / 86400000) + 1} days`}
+   746→            />
+   747→          </div>
+   748→
+   749→          {/* Breakdown cards */}
+   750→          <div className="grid gap-4 md:grid-cols-2">
+   751→            {/* By method */}
+   752→            <Card>
+   753→              <CardHeader>
+   754→                <CardTitle className="text-sm">Income by Payment Method</CardTitle>
+   755→              </CardHeader>
+   756→              <CardContent>
+   757→                {report.summary.byMethod.length === 0 ? (
+   758→                  <p className="text-sm text-muted-foreground">No income in this period.</p>
+   759→                ) : (
+   760→                  <div className="space-y-2">
+   761→                    {report.summary.byMethod.map((m) => (
+   762→                      <div key={m.method} className="flex items-center justify-between">
+   763→                        <div className="flex items-center gap-2">
+   764→                          <Badge variant="secondary" className="capitalize">{m.method.replace("_", " ")}</Badge>
+   765→                          <span className="text-xs text-muted-foreground">{m.count} payment(s)</span>
+   766→                        </div>
+   767→                        <span className="font-medium tabular-nums">{formatRupiah(m.total)}</span>
+   768→                      </div>
+   769→                    ))}
+   770→                  </div>
+   771→                )}
+   772→              </CardContent>
+   773→            </Card>
+   774→
+   775→            {/* By category */}
+   776→            <Card>
+   777→              <CardHeader>
+   778→                <CardTitle className="text-sm">Expenses by Category</CardTitle>
+   779→              </CardHeader>
+   780→              <CardContent>
+   781→                {report.summary.byCategory.length === 0 ? (
+   782→                  <p className="text-sm text-muted-foreground">No expenses in this period.</p>
+   783→                ) : (
+   784→                  <div className="space-y-2">
+   785→                    {report.summary.byCategory.map((c) => (
+   786→                      <div key={c.category} className="flex items-center justify-between">
+   787→                        <div className="flex items-center gap-2">
+   788→                          <Badge variant="outline" className={c.category.toLowerCase() === "refund" ? "border-amber-200 text-amber-700 dark:border-amber-900 dark:text-amber-400" : ""}>
+   789→                            {c.category}
+   790→                          </Badge>
+   791→                          <span className="text-xs text-muted-foreground">{c.count} item(s)</span>
+   792→                        </div>
+   793→                        <span className="font-medium tabular-nums">{formatRupiah(c.total)}</span>
+   794→                      </div>
+   795→                    ))}
+   796→                  </div>
+   797→                )}
+   798→              </CardContent>
+   799→            </Card>
+   800→          </div>
+   801→
+   802→          {/* Payments table */}
+   803→          <Card>
+   804→            <CardHeader>
+   805→              <CardTitle className="text-base">Payments ({report.payments.length})</CardTitle>
+   806→            </CardHeader>
+   807→            <CardContent className="p-0">
+   808→              {report.payments.length === 0 ? (
+   809→                <p className="p-6 text-center text-sm text-muted-foreground">No payments in this period.</p>
+   810→              ) : (
+   811→                <div className="max-h-[400px] overflow-auto">
+   812→                  <Table>
+   813→                    <TableHeader>
+   814→                      <TableRow>
+   815→                        <TableHead>Date</TableHead>
+   816→                        <TableHead>Student</TableHead>
+   817→                        <TableHead>Method</TableHead>
+   818→                        <TableHead>Package</TableHead>
+   819→                        <TableHead className="text-right">Amount</TableHead>
+   820→                      </TableRow>
+   821→                    </TableHeader>
+   822→                    <TableBody>
+   823→                      {report.payments.map((p) => (
+   824→                        <TableRow key={p.paymentId}>
+   825→                          <TableCell className="text-sm">{formatDate(p.paymentDate)}</TableCell>
+   826→                          <TableCell className="font-medium">{p.studentName}</TableCell>
+   827→                          <TableCell>
+   828→                            <Badge variant="secondary" className="capitalize">{p.paymentMethod.replace("_", " ")}</Badge>
+   829→                          </TableCell>
+   830→                          <TableCell className="text-sm">{p.packageName ?? "—"}</TableCell>
+   831→                          <TableCell className="text-right font-medium tabular-nums">{formatRupiah(p.amount)}</TableCell>
+   832→                        </TableRow>
+   833→                      ))}
+   834→                    </TableBody>
+   835→                  </Table>
+   836→                </div>
+   837→              )}
+   838→            </CardContent>
+   839→          </Card>
+   840→
+   841→          {/* Expenses table */}
+   842→          <Card>
+   843→            <CardHeader>
+   844→              <CardTitle className="text-base">Expenses ({report.expenses.length})</CardTitle>
+   845→            </CardHeader>
+   846→            <CardContent className="p-0">
+   847→              {report.expenses.length === 0 ? (
+   848→                <p className="p-6 text-center text-sm text-muted-foreground">No expenses in this period.</p>
+   849→              ) : (
+   850→                <div className="max-h-[400px] overflow-auto">
+   851→                  <Table>
+   852→                    <TableHeader>
+   853→                      <TableRow>
+   854→                        <TableHead>Date</TableHead>
+   855→                        <TableHead>Category</TableHead>
+   856→                        <TableHead>Note</TableHead>
+   857→                        <TableHead className="text-right">Amount</TableHead>
+   858→                      </TableRow>
+   859→                    </TableHeader>
+   860→                    <TableBody>
+   861→                      {report.expenses.map((e) => (
+   862→                        <TableRow key={e.expenseId}>
+   863→                          <TableCell className="text-sm">{formatDate(e.incurredOn)}</TableCell>
+   864→                          <TableCell>
+   865→                            <Badge variant="outline" className={e.category.toLowerCase() === "refund" ? "border-amber-200 text-amber-700 dark:border-amber-900 dark:text-amber-400" : ""}>
+   866→                              {e.category}
+   867→                            </Badge>
+   868→                          </TableCell>
+   869→                          <TableCell className="text-sm text-muted-foreground">{e.note ?? "—"}</TableCell>
+   870→                          <TableCell className="text-right font-medium tabular-nums">{formatRupiah(e.amount)}</TableCell>
+   871→                        </TableRow>
+   872→                      ))}
+   873→                    </TableBody>
+   874→                  </Table>
+   875→                </div>
+   876→              )}
+   877→            </CardContent>
+   878→          </Card>
+   879→        </>
+   880→      )}
+   881→    </div>
+   882→  );
+   883→}
+   884→
+   885→// ============================================================================
+   886→// Shared components
+   887→// ============================================================================
+   888→
+   889→function LoadingCard({ text }: { text: string }) {
+   890→  return (
+   891→    <Card>
+   892→      <CardContent className="flex items-center gap-3 p-6">
+   893→        <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" aria-hidden />
+   894→        <p className="text-sm text-muted-foreground">{text}</p>
+   895→      </CardContent>
+   896→    </Card>
+   897→  );
+   898→}
+   899→
+   900→function ErrorCard({ message, onRetry }: { message: string; onRetry: () => void }) {
+   901→  return (
+   902→    <Card className="border-destructive/30">
+   903→      <CardContent className="p-6">
+   904→        <div className="flex items-start gap-3">
+   905→          <AlertCircle className="h-5 w-5 text-destructive flex-shrink-0 mt-0.5" aria-hidden />
+   906→          <div>
+   907→            <p className="text-sm font-medium text-destructive">Failed to load report</p>
+   908→            <p className="mt-1 text-sm text-muted-foreground">{message}</p>
+   909→            <Button variant="outline" size="sm" className="mt-3 gap-2" onClick={onRetry}>
+   910→              <RefreshCw className="h-4 w-4" aria-hidden /> Retry
+   911→            </Button>
+   912→          </div>
+   913→        </div>
+   914→      </CardContent>
+   915→    </Card>
+   916→  );
+   917→}
+   918→
+   919→// ============================================================================
+   920→// CSV Export Helpers
+   921→// ============================================================================
+   922→
+   923→function escapeCSV(value: string | number | null | undefined): string {
+   924→  if (value === null || value === undefined) return "";
+   925→  const s = String(value);
+   926→  // Quote if contains comma, quote, or newline.
+   927→  if (s.includes(",") || s.includes('"') || s.includes("\n")) {
+   928→    return `"${s.replace(/"/g, '""')}"`;
+   929→  }
+   930→  return s;
+   931→}
+   932→
+   933→function downloadCSV(filename: string, rows: string[][]): void {
+   934→  const csv = rows.map((r) => r.map(escapeCSV).join(",")).join("\n");
+   935→  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+   936→  const url = URL.createObjectURL(blob);
+   937→  const link = document.createElement("a");
+   938→  link.href = url;
+   939→  link.download = filename;
+   940→  document.body.appendChild(link);
+   941→  link.click();
+   942→  document.body.removeChild(link);
+   943→  URL.revokeObjectURL(url);
+   944→}
+   945→
+   946→function downloadStudentRosterCSV(students: StudentRosterEntry[]): void {
+   947→  const headers = ["Student", "Class", "Packages", "Active Entitlements", "Completed", "Awaiting Makeup", "Last Attended", "Last Status"];
+   948→  const rows: string[][] = students.map((s) => [
+   949→    s.fullName,
+   950→    s.currentClassName ?? "",
+   951→    String(s.packageCount),
+   952→    String(s.activeEntitlements),
+   953→    String(s.completedEntitlements),
+   954→    String(s.awaitingMakeupEntitlements),
+   955→    s.lastAttendedDate ?? "",
+   956→    s.lastAttendedStatus ?? "",
+   957→  ]);
+   958→  downloadCSV(`student-roster-${new Date().toISOString().split("T")[0]}.csv`, [headers, ...rows]);
+   959→}
+   960→
+   961→function downloadFinanceCSV(payments: FinanceReportPayment[], expenses: FinanceReportExpense[], fromDate: string, toDate: string): void {
+   962→  // Two sections: payments then expenses, separated by a blank row.
+   963→  const paymentHeaders = ["Type", "Date", "Student/Category", "Method/Note", "Package", "Status", "Amount"];
+   964→  const paymentRows = payments.map((p) => [
+   965→    "Payment",
+   966→    p.paymentDate,
+   967→    p.studentName,
+   968→    p.paymentMethod,
+   969→    p.packageName ?? "",
+   970→    p.status,
+   971→    p.amount,
+   972→  ]);
+   973→  const expenseHeaders = ["Type", "Date", "Student/Category", "Method/Note", "Package", "Status", "Amount"];
+   974→  const expenseRows = expenses.map((e) => [
+   975→    "Expense",
+   976→    e.incurredOn,
+   977→    e.category,
+   978→    e.note ?? "",
+   979→    "",
+   980→    "",
+   981→    e.amount,
+   982→  ]);
+   983→  downloadCSV(`finance-report-${fromDate}-to-${toDate}.csv`, [
+   984→    paymentHeaders,
+   985→    ...paymentRows,
+   986→    [], // blank separator row
+   987→    expenseHeaders,
+   988→    ...expenseRows,
+   989→  ]);
+   990→}
+   991→
+   992→// ============================================================================
+   993→// Shared components
+   994→// ============================================================================
+   995→
+   996→function SummaryCard({
+   997→  label,
+   998→  value,
+   999→  icon: Icon,
+  1000→  color,
+  1001→  subtitle,
+  1002→}: {
+  1003→  label: string;
+  1004→  value: string | number;
+  1005→  icon: React.ComponentType<{ className?: string }>;
+  1006→  color: "emerald" | "rose" | "primary" | "amber" | "sky" | "muted";
+  1007→  subtitle?: string;
+  1008→}) {
+  1009→  const colors: Record<typeof color, string> = {
+  1010→    emerald: "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-400",
+  1011→    rose: "bg-rose-50 text-rose-700 dark:bg-rose-950/50 dark:text-rose-400",
+  1012→    primary: "bg-primary/10 text-primary",
+  1013→    amber: "bg-amber-50 text-amber-700 dark:bg-amber-950/50 dark:text-amber-400",
+  1014→    sky: "bg-sky-50 text-sky-700 dark:bg-sky-950/50 dark:text-sky-400",
+  1015→    muted: "bg-muted text-muted-foreground",
+  1016→  };
+  1017→  return (
+  1018→    <Card>
+  1019→      <CardContent className="p-4">
+  1020→        <div className="flex items-center justify-between">
+  1021→          <p className="text-xs uppercase tracking-wide text-muted-foreground">{label}</p>
+  1022→          <div className={`flex h-7 w-7 items-center justify-center rounded-md ${colors[color]}`}>
+  1023→            <Icon className="h-4 w-4" aria-hidden />
+  1024→          </div>
+  1025→        </div>
+  1026→        <p className="mt-2 text-xl font-semibold tabular-nums">{value}</p>
+  1027→        {subtitle && <p className="mt-0.5 text-xs text-muted-foreground">{subtitle}</p>}
+  1028→      </CardContent>
+  1029→    </Card>
+  1030→  );
+  1031→}
+  1032→

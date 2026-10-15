@@ -1,0 +1,39 @@
+# Netlify deployment configuration for the Futsal Academy Management System.
+#
+# This file configures the minimum required settings for deploying the
+# Next.js application to Netlify. It does NOT contain secrets — all
+# sensitive environment variables must be set via the Netlify UI or CLI
+# (never committed to the repository).
+#
+# Portability: The standard `next build` output (without `output: "standalone"`)
+# works on Netlify, Vercel, and self-hosting (via `next start`). This config
+# is additive — it does not restrict the project to Netlify.
+
+[build]
+  command = "npm run build"
+  publish = ".next"
+
+# Environment variables required at runtime (set via Netlify UI, NOT here):
+#   DATABASE_URL      — postgresql://user:password@host:5432/dbname?sslmode=require
+#   SESSION_SECRET    — 64-char hex string (openssl rand -hex 32)
+#   CSRF_SECRET       — 64-char hex string (openssl rand -hex 32)
+#   NODE_ENV          — "production" (set automatically by Netlify)
+#   ACADEMY_TIMEZONE  — "Asia/Jakarta" (or your academy's timezone)
+#
+# Test-only (NOT needed for production):
+#   TEST_DATABASE_URL — postgresql://... pointing to a *_test database
+#
+# Database migrations:
+#   Migrations must be run against the production PostgreSQL database BEFORE
+#   the first deployment. Run `bun run db:migrate` with DATABASE_URL set to
+#   the production database. Do NOT run migrations automatically during the
+#   Netlify build — the migration runner validates environment configuration
+#   (including SESSION_SECRET/CSRF_SECRET) which may differ between build
+#   and runtime contexts.
+#
+#   Recommended approach:
+#   1. Provision the PostgreSQL database.
+#   2. Set DATABASE_URL locally (or in CI) pointing to the production DB.
+#   3. Run `bun run db:migrate` to apply all migrations.
+#   4. Provision the first admin: `bun run provision-admin` (follow prompts).
+#   5. Deploy to Netlify (the app will use DATABASE_URL at runtime).

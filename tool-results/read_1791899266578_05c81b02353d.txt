@@ -1,0 +1,602 @@
+  1184→function ClassManagement({ academyId }: { academyId: string }) {
+  1185→  const [state, setState] = useState<ClassListState>({ status: "loading" });
+  1186→  const [showCreate, setShowCreate] = useState(false);
+  1187→  const [editClass, setEditClass] = useState<ClassRow | null>(null);
+  1188→  const [selectedClassId, setSelectedClassId] = useState<string | null>(null);
+  1189→
+  1190→  const academyIdRef = useRef(academyId);
+  1191→  useEffect(() => { academyIdRef.current = academyId; }, [academyId]);
+  1192→
+  1193→  const fetchList = useCallback(async () => {
+  1194→    const aid = academyId;
+  1195→    setState({ status: "loading" });
+  1196→    try {
+  1197→      const res = await fetch(`/api/admin/classes?academyId=${aid}`, { credentials: "same-origin" });
+  1198→      const data = (await res.json()) as { classes?: ClassRow[]; error?: { message?: string } };
+  1199→      if (aid !== academyIdRef.current) return;
+  1200→      if (!res.ok || !data.classes) {
+  1201→        setState({ status: "error", message: data.error?.message ?? `Error ${res.status}` });
+  1202→        return;
+  1203→      }
+  1204→      setState({ status: "success", data: data.classes });
+  1205→    } catch {
+  1206→      if (aid !== academyIdRef.current) return;
+  1207→      setState({ status: "error", message: "Network error" });
+  1208→    }
+  1209→  }, [academyId]);
+  1210→
+  1211→  useEffect(() => {
+  1212→    if (!academyId) return;
+  1213→    let cancelled = false;
+  1214→    void (async () => {
+  1215→      try {
+  1216→        const res = await fetch(`/api/admin/classes?academyId=${academyId}`, { credentials: "same-origin" });
+  1217→        if (cancelled) return;
+  1218→        const data = (await res.json()) as { classes?: ClassRow[]; error?: { message?: string } };
+  1219→        if (cancelled) return;
+  1220→        if (!res.ok || !data.classes) {
+  1221→          setState({ status: "error", message: data.error?.message ?? `Error ${res.status}` });
+  1222→          return;
+  1223→        }
+  1224→        setState({ status: "success", data: data.classes });
+  1225→      } catch {
+  1226→        if (cancelled) return;
+  1227→        setState({ status: "error", message: "Network error" });
+  1228→      }
+  1229→    })();
+  1230→    return () => { cancelled = true; };
+  1231→  }, [academyId]);
+  1232→
+  1233→  if (selectedClassId) {
+  1234→    return (
+  1235→      <ClassDetail
+  1236→        classId={selectedClassId}
+  1237→        academyId={academyId}
+  1238→        onBack={() => { setSelectedClassId(null); fetchList(); }}
+  1239→      />
+  1240→    );
+  1241→  }
+  1242→
+  1243→  return (
+  1244→    <div className="space-y-4">
+  1245→      <div className="flex items-center justify-between">
+  1246→        <h3 className="text-sm font-medium text-muted-foreground">Classes</h3>
+  1247→        <Button className="gap-2" onClick={() => setShowCreate(true)}>
+  1248→          <UserPlus className="h-4 w-4" aria-hidden /> Add Class
+  1249→        </Button>
+  1250→      </div>
+  1251→
+  1252→      {state.status === "loading" && (
+  1253→        <Card><CardContent className="flex items-center gap-3 p-6">
+  1254→          <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" aria-hidden />
+  1255→          <p className="text-sm text-muted-foreground">Loading classes…</p>
+  1256→        </CardContent></Card>
+  1257→      )}
+  1258→
+  1259→      {state.status === "error" && (
+  1260→        <Card className="border-destructive/30">
+  1261→          <CardContent className="p-6">
+  1262→            <div className="flex items-start gap-3">
+  1263→              <AlertCircle className="h-5 w-5 text-destructive flex-shrink-0 mt-0.5" aria-hidden />
+  1264→              <div>
+  1265→                <p className="text-sm font-medium text-destructive">Failed to load classes</p>
+  1266→                <p className="mt-1 text-sm text-muted-foreground">{state.message}</p>
+  1267→                <Button variant="outline" size="sm" className="mt-3 gap-2" onClick={fetchList}>
+  1268→                  <RefreshCw className="h-4 w-4" aria-hidden /> Retry
+  1269→                </Button>
+  1270→              </div>
+  1271→            </div>
+  1272→          </CardContent>
+  1273→        </Card>
+  1274→      )}
+  1275→
+  1276→      {state.status === "success" && (
+  1277→        <>
+  1278→          {state.data.length === 0 ? (
+  1279→            <Card><CardContent className="p-8 text-center">
+  1280→              <CalendarDays className="mx-auto h-8 w-8 text-muted-foreground" aria-hidden />
+  1281→              <p className="mt-3 text-sm font-medium">No classes</p>
+  1282→              <p className="mt-1 text-sm text-muted-foreground">Click &ldquo;Add Class&rdquo; to create the first class.</p>
+  1283→            </CardContent></Card>
+  1284→          ) : (
+  1285→            <div className="space-y-2">
+  1286→              {state.data.map((c) => (
+  1287→                <Card key={c.id} className="cursor-pointer hover:border-primary/50 transition-colors" onClick={() => setSelectedClassId(c.id)}>
+  1288→                  <CardContent className="flex items-center justify-between p-4">
+  1289→                    <div>
+  1290→                      <p className="font-medium">{c.name}</p>
+  1291→                      <p className="text-sm text-muted-foreground">Capacity: {c.capacity}</p>
+  1292→                    </div>
+  1293→                    <div className="flex items-center gap-2">
+  1294→                      {!c.isActive && <Badge variant="outline">Inactive</Badge>}
+  1295→                      <Button variant="ghost" size="sm" onClick={(e) => { e.stopPropagation(); setEditClass(c); }}><Pencil className="h-4 w-4" aria-hidden /></Button>
+  1296→                    </div>
+  1297→                  </CardContent>
+  1298→                </Card>
+  1299→              ))}
+  1300→            </div>
+  1301→          )}
+  1302→        </>
+  1303→      )}
+  1304→
+  1305→      {showCreate && (
+  1306→        <CreateClassDialog
+  1307→          open={showCreate}
+  1308→          onClose={() => setShowCreate(false)}
+  1309→          academyId={academyId}
+  1310→          onCreated={() => { setShowCreate(false); fetchList(); }}
+  1311→        />
+  1312→      )}
+  1313→      {editClass && (
+  1314→        <EditClassDialog
+  1315→          open={editClass !== null}
+  1316→          onClose={() => setEditClass(null)}
+  1317→          classRow={editClass}
+  1318→          academyId={academyId}
+  1319→          onSaved={() => { setEditClass(null); fetchList(); }}
+  1320→        />
+  1321→      )}
+  1322→    </div>
+  1323→  );
+  1324→}
+  1325→
+  1326→// === Class Detail (with schedule versions, slots, occurrences) =========
+  1327→
+  1328→interface ScheduleVersion {
+  1329→  id: string;
+  1330→  effectiveFrom: string;
+  1331→  effectiveTo: string | null;
+  1332→  status: string;
+  1333→}
+  1334→
+  1335→interface SlotRow {
+  1336→  id: string;
+  1337→  weekday: number;
+  1338→  startTime: string;
+  1339→  endTime: string;
+  1340→  capacityOverride: number | null;
+  1341→}
+  1342→
+  1343→interface OccurrenceRow {
+  1344→  id: string;
+  1345→  occurrenceDate: string;
+  1346→  startAt: string;
+  1347→  endAt: string;
+  1348→  status: string;
+  1349→  capacity: number;
+  1350→  cancelledReason: string | null;
+  1351→}
+  1352→
+  1353→const WEEKDAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+  1354→
+  1355→function ClassDetail({ classId, academyId, onBack }: {
+  1356→  classId: string; academyId: string; onBack: () => void;
+  1357→}) {
+  1358→  const [className, setClassName] = useState("Loading…");
+  1359→  const [versions, setVersions] = useState<ScheduleVersion[]>([]);
+  1360→  const [slots, setSlots] = useState<SlotRow[]>([]);
+  1361→  const [occurrences, setOccurrences] = useState<OccurrenceRow[]>([]);
+  1362→  const [showCreateVersion, setShowCreateVersion] = useState(false);
+  1363→  const [showAddSlot, setShowAddSlot] = useState(false);
+  1364→  const [showGenerate, setShowGenerate] = useState(false);
+  1365→  const [loading, setLoading] = useState(true);
+  1366→  const [error, setError] = useState<string | null>(null);
+  1367→  const [genResult, setGenResult] = useState<string | null>(null);
+  1368→
+  1369→  const refetch = useCallback(async () => {
+  1370→    let cancelled = false;
+  1371→    setLoading(true);
+  1372→    setError(null);
+  1373→    try {
+  1374→      const [classRes, versionRes, occRes] = await Promise.all([
+  1375→        fetch(`/api/admin/classes/${classId}?academyId=${academyId}`, { credentials: "same-origin" }),
+  1376→        fetch(`/api/admin/classes/${classId}/schedule-versions?academyId=${academyId}`, { credentials: "same-origin" }),
+  1377→        fetch(`/api/admin/classes/${classId}/occurrences?academyId=${academyId}`, { credentials: "same-origin" }),
+  1378→      ]);
+  1379→      if (cancelled) return;
+  1380→      if (!classRes.ok) { setError("Failed to load class"); return; }
+  1381→      const classData = (await classRes.json()) as { name?: string };
+  1382→      if (cancelled) return;
+  1383→      setClassName(classData.name ?? "Unknown");
+  1384→      const versionData = versionRes.ok ? ((await versionRes.json()) as { versions?: ScheduleVersion[] }).versions ?? [] : [];
+  1385→      setVersions(versionData);
+  1386→      const activeVersion = versionData.find((v) => v.status === "active");
+  1387→      if (activeVersion) {
+  1388→        const slotsRes = await fetch(`/api/admin/schedule-versions/${activeVersion.id}/slots?academyId=${academyId}`, { credentials: "same-origin" });
+  1389→        if (slotsRes.ok) {
+  1390→          const slotsData = (await slotsRes.json()) as { slots?: SlotRow[] };
+  1391→          if (!cancelled) setSlots(slotsData.slots ?? []);
+  1392→        }
+  1393→      } else {
+  1394→        setSlots([]);
+  1395→      }
+  1396→      const occData = occRes.ok ? ((await occRes.json()) as { occurrences?: OccurrenceRow[] }).occurrences ?? [] : [];
+  1397→      if (!cancelled) setOccurrences(occData);
+  1398→    } catch { if (!cancelled) setError("Network error"); }
+  1399→    finally { if (!cancelled) setLoading(false); }
+  1400→    return () => { cancelled = true; };
+  1401→  }, [classId, academyId]);
+  1402→
+  1403→  useEffect(() => { void refetch(); }, [refetch]);
+  1404→
+  1405→  if (loading) {
+  1406→    return <Card><CardContent className="flex items-center gap-3 p-6"><Loader2 className="h-5 w-5 animate-spin text-muted-foreground" aria-hidden /><p className="text-sm text-muted-foreground">Loading class…</p></CardContent></Card>;
+  1407→  }
+  1408→  if (error) {
+  1409→    return <Card className="border-destructive/30"><CardContent className="p-6"><div className="flex items-start gap-3"><AlertCircle className="h-5 w-5 text-destructive flex-shrink-0 mt-0.5" aria-hidden /><div><p className="text-sm font-medium text-destructive">{error}</p><Button variant="outline" size="sm" className="mt-3 gap-2" onClick={onBack}><ArrowLeft className="h-4 w-4" aria-hidden /> Back</Button></div></div></CardContent></Card>;
+  1410→  }
+  1411→
+  1412→  const activeVersion = versions.find((v) => v.status === "active");
+  1413→
+  1414→  return (
+  1415→    <div className="space-y-4">
+  1416→      <div className="flex items-center gap-3">
+  1417→        <Button variant="ghost" size="sm" onClick={onBack} className="gap-2"><ArrowLeft className="h-4 w-4" aria-hidden /> Back</Button>
+  1418→        <h2 className="text-lg font-semibold">{className}</h2>
+  1419→      </div>
+  1420→
+  1421→      {/* Schedule Versions */}
+  1422→      <Card>
+  1423→        <CardHeader className="flex-row items-center justify-between">
+  1424→          <CardTitle className="text-base">Schedule Versions</CardTitle>
+  1425→          <Button variant="outline" size="sm" className="gap-2" onClick={() => setShowCreateVersion(true)}>
+  1426→            <UserPlus className="h-4 w-4" aria-hidden /> New Version
+  1427→          </Button>
+  1428→        </CardHeader>
+  1429→        <CardContent>
+  1430→          {versions.length === 0 ? (
+  1431→            <p className="text-sm text-muted-foreground">No schedule versions. Create one to define training days and times.</p>
+  1432→          ) : (
+  1433→            <div className="space-y-2">
+  1434→              {versions.map((v) => (
+  1435→                <div key={v.id} className="flex items-center justify-between rounded-lg border p-3 text-sm">
+  1436→                  <div>
+  1437→                    <p className="font-medium">From: {v.effectiveFrom}{v.effectiveTo ? ` → To: ${v.effectiveTo}` : ""}</p>
+  1438→                    <p className="text-muted-foreground">Status: {v.status}</p>
+  1439→                  </div>
+  1440→                  {v.status === "active" && <Badge>Active</Badge>}
+  1441→                  {v.status === "superseded" && <Badge variant="outline">Superseded</Badge>}
+  1442→                </div>
+  1443→              ))}
+  1444→            </div>
+  1445→          )}
+  1446→        </CardContent>
+  1447→      </Card>
+  1448→
+  1449→      {/* Slots (for active version) */}
+  1450→      {activeVersion && (
+  1451→        <Card>
+  1452→          <CardHeader className="flex-row items-center justify-between">
+  1453→            <CardTitle className="text-base">Training Slots</CardTitle>
+  1454→            <Button variant="outline" size="sm" className="gap-2" onClick={() => setShowAddSlot(true)}>
+  1455→              <UserPlus className="h-4 w-4" aria-hidden /> Add Slot
+  1456→            </Button>
+  1457→          </CardHeader>
+  1458→          <CardContent>
+  1459→            {slots.length === 0 ? (
+  1460→              <p className="text-sm text-muted-foreground">No slots defined. Add a training slot (e.g., Tuesday 15:00-16:00).</p>
+  1461→            ) : (
+  1462→              <div className="space-y-2">
+  1463→                {slots.map((s) => (
+  1464→                  <div key={s.id} className="flex items-center justify-between rounded-lg border p-3 text-sm">
+  1465→                    <div>
+  1466→                      <p className="font-medium">{WEEKDAY_NAMES[s.weekday]} {s.startTime}–{s.endTime}</p>
+  1467→                      {s.capacityOverride && <p className="text-muted-foreground">Capacity override: {s.capacityOverride}</p>}
+  1468→                    </div>
+  1469→                    <DeleteSlotButton slotId={s.id} academyId={academyId} onDeleted={refetch} />
+  1470→                  </div>
+  1471→                ))}
+  1472→              </div>
+  1473→            )}
+  1474→          </CardContent>
+  1475→        </Card>
+  1476→      )}
+  1477→
+  1478→      {/* Occurrence Generation */}
+  1479→      {activeVersion && slots.length > 0 && (
+  1480→        <Card>
+  1481→          <CardHeader className="flex-row items-center justify-between">
+  1482→            <CardTitle className="text-base">Training Occurrences</CardTitle>
+  1483→            <Button variant="outline" size="sm" className="gap-2" onClick={() => setShowGenerate(true)}>
+  1484→              <CalendarDays className="h-4 w-4" aria-hidden /> Generate
+  1485→            </Button>
+  1486→          </CardHeader>
+  1487→          <CardContent>
+  1488→            {genResult && <p className="text-sm text-emerald-600 mb-3">{genResult}</p>}
+  1489→            {occurrences.length === 0 ? (
+  1490→              <p className="text-sm text-muted-foreground">No occurrences generated yet.</p>
+  1491→            ) : (
+  1492→              <div className="max-h-96 overflow-y-auto space-y-1.5">
+  1493→                {occurrences.slice(0, 50).map((o) => (
+  1494→                  <div key={o.id} className="flex items-center justify-between rounded border p-2 text-sm">
+  1495→                    <span>{o.occurrenceDate}</span>
+  1496→                    <div className="flex items-center gap-2">
+  1497→                      {o.status === "cancelled" && <Badge variant="destructive">Cancelled</Badge>}
+  1498→                      {o.status === "planned" && <Badge variant="secondary">Planned</Badge>}
+  1499→                      {o.status === "completed" && <Badge>Completed</Badge>}
+  1500→                      <span className="text-muted-foreground text-xs">{o.capacity} cap</span>
+  1501→                    </div>
+  1502→                  </div>
+  1503→                ))}
+  1504→                {occurrences.length > 50 && <p className="text-xs text-muted-foreground">Showing 50 of {occurrences.length}</p>}
+  1505→              </div>
+  1506→            )}
+  1507→          </CardContent>
+  1508→        </Card>
+  1509→      )}
+  1510→
+  1511→      {/* Dialogs */}
+  1512→      {showCreateVersion && (
+  1513→        <CreateVersionDialog open={showCreateVersion} onClose={() => setShowCreateVersion(false)} classId={classId} academyId={academyId} onCreated={() => { setShowCreateVersion(false); refetch(); }} />
+  1514→      )}
+  1515→      {showAddSlot && activeVersion && (
+  1516→        <AddSlotDialog open={showAddSlot} onClose={() => setShowAddSlot(false)} versionId={activeVersion.id} academyId={academyId} onAdded={() => { setShowAddSlot(false); refetch(); }} />
+  1517→      )}
+  1518→      {showGenerate && (
+  1519→        <GenerateDialog open={showGenerate} onClose={() => setShowGenerate(false)} classId={classId} academyId={academyId} onGenerated={(msg) => { setShowGenerate(false); setGenResult(msg); refetch(); }} />
+  1520→      )}
+  1521→    </div>
+  1522→  );
+  1523→}
+  1524→
+  1525→// === Delete Slot Button =================================================
+  1526→
+  1527→function DeleteSlotButton({ slotId, academyId, onDeleted }: { slotId: string; academyId: string; onDeleted: () => void }) {
+  1528→  const [confirming, setConfirming] = useState(false);
+  1529→  const [submitting, setSubmitting] = useState(false);
+  1530→  const [error, setError] = useState<string | null>(null);
+  1531→
+  1532→  const handleDelete = async () => {
+  1533→    setSubmitting(true); setError(null);
+  1534→    try {
+  1535→      const res = await adminFetch(`/api/admin/schedule-slots/${slotId}?academyId=${academyId}`, "DELETE", {});
+  1536→      if (res.ok) { onDeleted(); return; }
+  1537→      const data = (await res.json()) as { error?: { message?: string } };
+  1538→      setError(data.error?.message ?? `Error ${res.status}`);
+  1539→    } catch { setError("Network error"); }
+  1540→    finally { setSubmitting(false); }
+  1541→  };
+  1542→
+  1543→  if (confirming) {
+  1544→    return (
+  1545→      <div className="flex items-center gap-2">
+  1546→        {error && <span className="text-xs text-destructive">{error}</span>}
+  1547→        <Button variant="destructive" size="sm" disabled={submitting} onClick={handleDelete}>{submitting ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : "Confirm"}</Button>
+  1548→        <Button variant="outline" size="sm" onClick={() => { setConfirming(false); setError(null); }}>Cancel</Button>
+  1549→      </div>
+  1550→    );
+  1551→  }
+  1552→  return <Button variant="ghost" size="sm" onClick={() => setConfirming(true)}><Trash2 className="h-4 w-4" aria-hidden /></Button>;
+  1553→}
+  1554→
+  1555→// === Create Version Dialog =============================================
+  1556→
+  1557→function CreateVersionDialog({ open, onClose, classId, academyId, onCreated }: {
+  1558→  open: boolean; onClose: () => void; classId: string; academyId: string; onCreated: () => void;
+  1559→}) {
+  1560→  const [effectiveFrom, setEffectiveFrom] = useState(new Date().toISOString().split("T")[0]!);
+  1561→  const [submitting, setSubmitting] = useState(false);
+  1562→  const [error, setError] = useState<string | null>(null);
+  1563→
+  1564→  useEffect(() => { if (open) { setSubmitting(false); setError(null); } }, [open]);
+  1565→
+  1566→  const handleSubmit = async () => {
+  1567→    if (!effectiveFrom) { setError("Effective date is required."); return; }
+  1568→    setSubmitting(true); setError(null);
+  1569→    try {
+  1570→      const res = await adminFetch(`/api/admin/classes/${classId}/schedule-versions?academyId=${academyId}`, "POST", { effectiveFrom });
+  1571→      if (res.status === 201) { onCreated(); return; }
+  1572→      const data = (await res.json()) as { error?: { message?: string } };
+  1573→      setError(data.error?.message ?? `Error ${res.status}`);
+  1574→    } catch { setError("Network error"); }
+  1575→    finally { setSubmitting(false); }
+  1576→  };
+  1577→
+  1578→  const handleClose = () => { if (submitting) return; onClose(); };
+  1579→
+  1580→  return (
+  1581→    <Dialog open={open} onOpenChange={(v) => { if (!v) handleClose(); }}>
+  1582→      <DialogContent className="sm:max-w-md">
+  1583→        <DialogHeader><DialogTitle>New Schedule Version</DialogTitle><DialogDescription>This will supersede any existing active version.</DialogDescription></DialogHeader>
+  1584→        <div className="space-y-4">
+  1585→          <div className="space-y-2">
+  1586→            <Label htmlFor="version-date">Effective From *</Label>
+  1587→            <Input id="version-date" type="date" value={effectiveFrom} onChange={(e) => setEffectiveFrom(e.target.value)} disabled={submitting} />
+  1588→          </div>
+  1589→          {error && <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 p-3"><AlertCircle className="h-4 w-4 text-destructive flex-shrink-0 mt-0.5" aria-hidden /><p className="text-sm text-destructive">{error}</p></div>}
+  1590→        </div>
+  1591→        <DialogFooter className="gap-2">
+  1592→          <Button variant="outline" onClick={handleClose} disabled={submitting}>Cancel</Button>
+  1593→          <Button onClick={handleSubmit} disabled={submitting}>{submitting ? <><Loader2 className="h-4 w-4 animate-spin" aria-hidden /> Creating…</> : "Create Version"}</Button>
+  1594→        </DialogFooter>
+  1595→      </DialogContent>
+  1596→    </Dialog>
+  1597→  );
+  1598→}
+  1599→
+  1600→// === Add Slot Dialog ===================================================
+  1601→
+  1602→function AddSlotDialog({ open, onClose, versionId, academyId, onAdded }: {
+  1603→  open: boolean; onClose: () => void; versionId: string; academyId: string; onAdded: () => void;
+  1604→}) {
+  1605→  const [weekday, setWeekday] = useState("2");
+  1606→  const [startTime, setStartTime] = useState("15:00");
+  1607→  const [endTime, setEndTime] = useState("16:00");
+  1608→  const [capacityOverride, setCapacityOverride] = useState("");
+  1609→  const [submitting, setSubmitting] = useState(false);
+  1610→  const [error, setError] = useState<string | null>(null);
+  1611→
+  1612→  useEffect(() => { if (open) { setSubmitting(false); setError(null); } }, [open]);
+  1613→
+  1614→  const handleSubmit = async () => {
+  1615→    if (startTime >= endTime) { setError("End time must be after start time."); return; }
+  1616→    setSubmitting(true); setError(null);
+  1617→    try {
+  1618→      const body: Record<string, unknown> = { weekday: parseInt(weekday, 10), startTime, endTime };
+  1619→      if (capacityOverride) { const n = parseInt(capacityOverride, 10); if (n > 0) body.capacityOverride = n; }
+  1620→      const res = await adminFetch(`/api/admin/schedule-versions/${versionId}/slots?academyId=${academyId}`, "POST", body);
+  1621→      if (res.status === 201) { onAdded(); return; }
+  1622→      const data = (await res.json()) as { error?: { message?: string } };
+  1623→      setError(data.error?.message ?? `Error ${res.status}`);
+  1624→    } catch { setError("Network error"); }
+  1625→    finally { setSubmitting(false); }
+  1626→  };
+  1627→
+  1628→  const handleClose = () => { if (submitting) return; onClose(); };
+  1629→
+  1630→  return (
+  1631→    <Dialog open={open} onOpenChange={(v) => { if (!v) handleClose(); }}>
+  1632→      <DialogContent className="sm:max-w-md">
+  1633→        <DialogHeader><DialogTitle>Add Training Slot</DialogTitle><DialogDescription>Define a recurring training day and time.</DialogDescription></DialogHeader>
+  1634→        <div className="space-y-4">
+  1635→          <div className="space-y-2">
+  1636→            <Label htmlFor="slot-weekday">Weekday *</Label>
+  1637→            <Select value={weekday} onValueChange={setWeekday} disabled={submitting}>
+  1638→              <SelectTrigger id="slot-weekday"><SelectValue /></SelectTrigger>
+  1639→              <SelectContent>
+  1640→                {WEEKDAY_NAMES.map((name, i) => (<SelectItem key={i} value={String(i)}>{name}</SelectItem>))}
+  1641→              </SelectContent>
+  1642→            </Select>
+  1643→          </div>
+  1644→          <div className="grid grid-cols-2 gap-4">
+  1645→            <div className="space-y-2"><Label htmlFor="slot-start">Start Time *</Label><Input id="slot-start" type="time" value={startTime} onChange={(e) => setStartTime(e.target.value)} disabled={submitting} /></div>
+  1646→            <div className="space-y-2"><Label htmlFor="slot-end">End Time *</Label><Input id="slot-end" type="time" value={endTime} onChange={(e) => setEndTime(e.target.value)} disabled={submitting} /></div>
+  1647→          </div>
+  1648→          <div className="space-y-2">
+  1649→            <Label htmlFor="slot-capacity">Capacity Override (optional)</Label>
+  1650→            <Input id="slot-capacity" type="number" value={capacityOverride} onChange={(e) => setCapacityOverride(e.target.value)} disabled={submitting} placeholder="Use class default" />
+  1651→          </div>
+  1652→          {error && <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 p-3"><AlertCircle className="h-4 w-4 text-destructive flex-shrink-0 mt-0.5" aria-hidden /><p className="text-sm text-destructive">{error}</p></div>}
+  1653→        </div>
+  1654→        <DialogFooter className="gap-2">
+  1655→          <Button variant="outline" onClick={handleClose} disabled={submitting}>Cancel</Button>
+  1656→          <Button onClick={handleSubmit} disabled={submitting}>{submitting ? <><Loader2 className="h-4 w-4 animate-spin" aria-hidden /> Adding…</> : "Add Slot"}</Button>
+  1657→        </DialogFooter>
+  1658→      </DialogContent>
+  1659→    </Dialog>
+  1660→  );
+  1661→}
+  1662→
+  1663→// === Generate Occurrences Dialog ======================================
+  1664→
+  1665→function GenerateDialog({ open, onClose, classId, academyId, onGenerated }: {
+  1666→  open: boolean; onClose: () => void; classId: string; academyId: string; onGenerated: (msg: string) => void;
+  1667→}) {
+  1668→  const [weeksAhead, setWeeksAhead] = useState("16");
+  1669→  const [submitting, setSubmitting] = useState(false);
+  1670→  const [error, setError] = useState<string | null>(null);
+  1671→
+  1672→  useEffect(() => { if (open) { setSubmitting(false); setError(null); } }, [open]);
+  1673→
+  1674→  const handleSubmit = async () => {
+  1675→    const weeks = parseInt(weeksAhead, 10);
+  1676→    if (!weeks || weeks < 1 || weeks > 52) { setError("Weeks must be 1-52."); return; }
+  1677→    setSubmitting(true); setError(null);
+  1678→    try {
+  1679→      const res = await adminFetch(`/api/admin/classes/${classId}/generate-occurrences?academyId=${academyId}`, "POST", { weeksAhead: weeks });
+  1680→      if (res.ok) {
+  1681→        const data = (await res.json()) as { generated: number; idempotent: boolean };
+  1682→        onGenerated(`Generated ${data.generated} new occurrence(s).${data.idempotent ? " All already existed." : ""}`);
+  1683→        return;
+  1684→      }
+  1685→      const data = (await res.json()) as { error?: { message?: string } };
+  1686→      setError(data.error?.message ?? `Error ${res.status}`);
+  1687→    } catch { setError("Network error"); }
+  1688→    finally { setSubmitting(false); }
+  1689→  };
+  1690→
+  1691→  const handleClose = () => { if (submitting) return; onClose(); };
+  1692→
+  1693→  return (
+  1694→    <Dialog open={open} onOpenChange={(v) => { if (!v) handleClose(); }}>
+  1695→      <DialogContent className="sm:max-w-md">
+  1696→        <DialogHeader><DialogTitle>Generate Occurrences</DialogTitle><DialogDescription>Generate future training sessions from the active schedule version.</DialogDescription></DialogHeader>
+  1697→        <div className="space-y-4">
+  1698→          <div className="space-y-2">
+  1699→            <Label htmlFor="gen-weeks">Weeks Ahead *</Label>
+  1700→            <Input id="gen-weeks" type="number" value={weeksAhead} onChange={(e) => setWeeksAhead(e.target.value)} disabled={submitting} min={1} max={52} />
+  1701→            <p className="text-xs text-muted-foreground">1-52 weeks. Generation is idempotent — running twice creates no duplicates.</p>
+  1702→          </div>
+  1703→          {error && <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 p-3"><AlertCircle className="h-4 w-4 text-destructive flex-shrink-0 mt-0.5" aria-hidden /><p className="text-sm text-destructive">{error}</p></div>}
+  1704→        </div>
+  1705→        <DialogFooter className="gap-2">
+  1706→          <Button variant="outline" onClick={handleClose} disabled={submitting}>Cancel</Button>
+  1707→          <Button onClick={handleSubmit} disabled={submitting}>{submitting ? <><Loader2 className="h-4 w-4 animate-spin" aria-hidden /> Generating…</> : "Generate"}</Button>
+  1708→        </DialogFooter>
+  1709→      </DialogContent>
+  1710→    </Dialog>
+  1711→  );
+  1712→}
+  1713→
+  1714→// === Create Class Dialog ================================================
+  1715→
+  1716→function CreateClassDialog({ open, onClose, academyId, onCreated }: {
+  1717→  open: boolean; onClose: () => void; academyId: string; onCreated: () => void;
+  1718→}) {
+  1719→  const [name, setName] = useState("");
+  1720→  const [capacity, setCapacity] = useState("");
+  1721→  const [submitting, setSubmitting] = useState(false);
+  1722→  const [error, setError] = useState<string | null>(null);
+  1723→
+  1724→  useEffect(() => { if (open) { setName(""); setCapacity(""); setSubmitting(false); setError(null); } }, [open]);
+  1725→
+  1726→  const handleSubmit = async () => {
+  1727→    if (!name.trim()) { setError("Class name is required."); return; }
+  1728→    setSubmitting(true); setError(null);
+  1729→    try {
+  1730→      const body: Record<string, unknown> = { name: name.trim() };
+  1731→      if (capacity) { const n = parseInt(capacity, 10); if (n > 0) body.capacity = n; }
+  1732→      const res = await adminFetch(`/api/admin/classes?academyId=${academyId}`, "POST", body);
+  1733→      if (res.status === 201) { onCreated(); return; }
+  1734→      const data = (await res.json()) as { error?: { message?: string } };
+  1735→      setError(data.error?.message ?? `Error ${res.status}`);
+  1736→    } catch { setError("Network error"); }
+  1737→    finally { setSubmitting(false); }
+  1738→  };
+  1739→
+  1740→  const handleClose = () => { if (submitting) return; onClose(); };
+  1741→
+  1742→  return (
+  1743→    <Dialog open={open} onOpenChange={(v) => { if (!v) handleClose(); }}>
+  1744→      <DialogContent className="sm:max-w-md">
+  1745→        <DialogHeader>
+  1746→          <DialogTitle>Add New Class</DialogTitle>
+  1747→          <DialogDescription>Create a new training class in this academy.</DialogDescription>
+  1748→        </DialogHeader>
+  1749→        <div className="space-y-4">
+  1750→          <div className="space-y-2">
+  1751→            <Label htmlFor="create-class-name">Class Name *</Label>
+  1752→            <Input id="create-class-name" value={name} onChange={(e) => setName(e.target.value)} disabled={submitting} placeholder="e.g., Beginner Group" />
+  1753→          </div>
+  1754→          <div className="space-y-2">
+  1755→            <Label htmlFor="create-class-capacity">Capacity (optional, default 12)</Label>
+  1756→            <Input id="create-class-capacity" type="number" value={capacity} onChange={(e) => setCapacity(e.target.value)} disabled={submitting} placeholder="12" />
+  1757→          </div>
+  1758→          {error && (
+  1759→            <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 p-3">
+  1760→              <AlertCircle className="h-4 w-4 text-destructive flex-shrink-0 mt-0.5" aria-hidden />
+  1761→              <p className="text-sm text-destructive">{error}</p>
+  1762→            </div>
+  1763→          )}
+  1764→        </div>
+  1765→        <DialogFooter className="gap-2">
+  1766→          <Button variant="outline" onClick={handleClose} disabled={submitting}>Cancel</Button>
+  1767→          <Button onClick={handleSubmit} disabled={submitting}>
+  1768→            {submitting ? <><Loader2 className="h-4 w-4 animate-spin" aria-hidden /> Creating…</> : "Create Class"}
+  1769→          </Button>
+  1770→        </DialogFooter>
+  1771→      </DialogContent>
+  1772→    </Dialog>
+  1773→  );
+  1774→}
+  1775→
+  1776→// === Edit Class Dialog ==================================================
+  1777→
+  1778→function EditClassDialog({ open, onClose, classRow, academyId, onSaved }: {
+  1779→  open: boolean; onClose: () => void; classRow: ClassRow; academyId: string; onSaved: () => void;
+  1780→}) {
+  1781→  const [name, setName] = useState(classRow.name);
+  1782→  const [capacity, setCapacity] = useState(String(classRow.capacity));
+  1783→  const [isActive, setIsActive] = useState(classRow.isActive);
+
+[showing lines 1184-1783 of 1839; use offset=1784 with limit to continue reading]
