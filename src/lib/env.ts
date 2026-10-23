@@ -93,7 +93,7 @@ export function loadEnv(): Env {
   // only; the actual secret value is never compared or logged.
   if (parsed.data.NODE_ENV === "production") {
     for (const v of [parsed.data.SESSION_SECRET, parsed.data.CSRF_SECRET] as const) {
-      if (v.startsWith("dev_only_change_me") || v === "replace_with_random_64_hex_chars") {
+      if (v.startsWith("dev_only_change_me") || v.startsWith("replace_with_random_secret") || v === "replace_with_random_64_hex_chars") {
         throw new AppError({
           code: "CONFIG_INVALID",
           httpStatus: 500,

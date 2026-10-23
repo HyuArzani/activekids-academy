@@ -36,7 +36,7 @@ await db.query(`INSERT INTO student_enrollments (id, student_id, class_id, effec
 const occId = randomUUID();
 await db.query(`INSERT INTO training_occurrences (id, academy_id, class_id, schedule_slot_id, schedule_version_id, occurrence_date, start_at, end_at, status, capacity) VALUES ($1,$2,$3,$4,$5,$6,'${today} 15:00:00','${today} 16:00:00','planned',12);`,[occId,ACADEMY_ID,classId,slotId,svId,today]);
 await db.query(`INSERT INTO attendance_records (id, training_occurrence_id, student_id, status, recorded_by) VALUES ($1,$2,$3,'present',$4);`,[randomUUID(),occId,s1,adminId]);
-await db.query(`INSERT INTO attendance_records (id, training_occurrence_id, student_id, status, recorded_by) VALUES ($1,$2,$3,'late',$4);`,[randomUUID(),occId,s2,adminId]);
+await db.query(`INSERT INTO attendance_records (id, training_occurrence_id, student_id, status, legacy_status, recorded_by) VALUES ($1,$2,$3,'present','late',$4);`,[randomUUID(),occId,s2,adminId]);
 
 // Package plan + package with 4 entitlements (2 active, 1 completed, 1 skipped)
 const planId = randomUUID();

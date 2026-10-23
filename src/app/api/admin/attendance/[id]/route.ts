@@ -5,7 +5,7 @@ import { handleApiRequest, parseBody, getAcademyIdFromQuery } from "@/lib/api/ha
 import { getAttendance, updateAttendance } from "@/lib/domain/attendance";
 
 const uuidSchema = z.string().uuid();
-const statusSchema = z.enum(["present", "absent", "excused", "late"]);
+const statusSchema = z.enum(["present", "absent", "excused"]);
 const updateSchema = z
   .object({
     status: statusSchema.optional(),

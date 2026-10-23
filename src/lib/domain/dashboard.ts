@@ -388,10 +388,10 @@ export async function getDashboardSummary(
 
   const attResult = await db.query<{ present: number; absent: number; excused: number; late: number }>(
     `SELECT
-       COUNT(*) FILTER (WHERE ar.status = 'present')::int AS present,
+       COUNT(*) FILTER (WHERE ar.status = 'present' AND ar.legacy_status IS DISTINCT FROM 'late')::int AS present,
        COUNT(*) FILTER (WHERE ar.status = 'absent')::int AS absent,
        COUNT(*) FILTER (WHERE ar.status = 'excused')::int AS excused,
-       COUNT(*) FILTER (WHERE ar.status = 'late')::int AS late
+       COUNT(*) FILTER (WHERE ar.legacy_status = 'late')::int AS late
      FROM attendance_records ar
      JOIN training_occurrences tocc ON tocc.id = ar.training_occurrence_id
     WHERE tocc.academy_id = $1

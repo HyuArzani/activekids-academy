@@ -60,6 +60,7 @@ beforeEach(async () => {
 
   // Enroll studentId in classId (effective from a past date so all test occurrences are eligible).
   await db.query(`INSERT INTO student_enrollments (id, student_id, class_id, effective_from) VALUES ($1, $2, $3, '2026-01-01');`, [randomUUID(), studentId, classId]);
+  await db.query(`INSERT INTO coach_student_assignments (id, coach_user_id, student_id, class_id) VALUES ($1, $2, $3, $4);`, [randomUUID(), coachA.id, studentId, classId]);
 
   planId = randomUUID();
   await db.query(`INSERT INTO package_plans (id, academy_id, name, session_count) VALUES ($1, $2, 'Plan 4', 4);`, [planId, ACADEMY_A_ID]);
@@ -149,6 +150,53 @@ test("GET roster rejects coach (403)", async () => {
   expect(res.status).toBe(403);
 });
 
+test("Coach can list assigned occurrences and roster students", async () => {
+  const { s } = await login(coachA.email, coachA.password);
+  const { GET: list } = await import("@/app/api/coach/occurrences/route");
+  const listRes = await list(await makeRequest(`/api/coach/occurrences?academyId=${ACADEMY_A_ID}`, { cookies: { [sessionCookieName()]: s } }));
+  expect(listRes.status).toBe(200);
+  const listed = (await listRes.json()) as { occurrences: { id: string }[] };
+  expect(listed.occurrences.map((occurrence) => occurrence.id)).toContain(occId1);
+
+  const { GET: roster } = await import("@/app/api/coach/occurrences/[id]/roster/route");
+  const rosterRes = await roster(await makeRequest(`/api/coach/occurrences/${occId1}/roster?academyId=${ACADEMY_A_ID}`, { cookies: { [sessionCookieName()]: s } }), { params: Promise.resolve({ id: occId1 }) });
+  expect(rosterRes.status).toBe(200);
+  const body = (await rosterRes.json()) as { roster: { student_id: string }[] };
+  expect(body.roster.map((student) => student.student_id)).toEqual([studentId]);
+});
+
+test("Coach can record assigned attendance with CSRF", async () => {
+  const { s, c } = await login(coachA.email, coachA.password);
+  const { POST } = await import("@/app/api/coach/occurrences/[id]/attendance/route");
+  const res = await POST(await makeRequest(`/api/coach/occurrences/${occId2}/attendance?academyId=${ACADEMY_A_ID}`, { method: "POST", body: { studentId, status: "excused" }, ...auth(s, c) }), { params: Promise.resolve({ id: occId2 }) });
+  expect(res.status).toBe(201);
+  const saved = await db.query<{ status: string }>(`SELECT status FROM attendance_records WHERE training_occurrence_id = $1 AND student_id = $2;`, [occId2, studentId]);
+  expect(saved.rows[0]?.status).toBe("excused");
+});
+
+test("Coach cannot record attendance for an unassigned student", async () => {
+  const unassignedStudentId = randomUUID();
+  await db.query(`INSERT INTO students (id, academy_id, full_name) VALUES ($1, $2, 'Unassigned Student');`, [unassignedStudentId, ACADEMY_A_ID]);
+  const { s, c } = await login(coachA.email, coachA.password);
+  const { POST } = await import("@/app/api/coach/occurrences/[id]/attendance/route");
+  const res = await POST(await makeRequest(`/api/coach/occurrences/${occId2}/attendance?academyId=${ACADEMY_A_ID}`, { method: "POST", body: { studentId: unassignedStudentId, status: "present" }, ...auth(s, c) }), { params: Promise.resolve({ id: occId2 }) });
+  expect(res.status).toBe(403);
+});
+
+test("Coach cannot record attendance after the seven-day Jakarta lock boundary", async () => {
+  const occurrenceId = randomUUID();
+  const occurrenceDate = new Date(Date.now() - 9 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  await db.query(
+    `INSERT INTO training_occurrences (id, academy_id, class_id, schedule_slot_id, schedule_version_id, occurrence_date, start_at, end_at, status, capacity)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'planned', 12);`,
+    [occurrenceId, ACADEMY_A_ID, classId, slotBId, versionId, occurrenceDate, `${occurrenceDate} 17:00:00`, `${occurrenceDate} 18:00:00`],
+  );
+  const { s, c } = await login(coachA.email, coachA.password);
+  const { POST } = await import("@/app/api/coach/occurrences/[id]/attendance/route");
+  const res = await POST(await makeRequest(`/api/coach/occurrences/${occurrenceId}/attendance?academyId=${ACADEMY_A_ID}`, { method: "POST", body: { studentId, status: "present" }, ...auth(s, c) }), { params: Promise.resolve({ id: occurrenceId }) });
+  expect(res.status).toBe(403);
+});
+
 // === POST record attendance =============================================
 
 test("POST attendance records (201) + audit", async () => {
@@ -212,12 +260,12 @@ test("POST attendance rejects without CSRF (403)", async () => {
   expect(res.status).toBe(403);
 });
 
-test("POST attendance with entitlement marks it completed (atomically)", async () => {
+test("POST attendance present with entitlement marks it completed (atomically)", async () => {
   const { s, c } = await login(adminA.email, adminA.password);
   // Assign entitlement 1 to occId2 first.
   await db.query(`UPDATE session_entitlements SET original_occurrence_id = $2, assigned_occurrence_id = $2 WHERE id = $1;`, [entitlementIds[1]!, occId2]);
   const { POST } = await import("@/app/api/admin/occurrences/[id]/attendance/route");
-  const res = await POST(await makeRequest(`/api/admin/occurrences/${occId2}/attendance?academyId=${ACADEMY_A_ID}`, { method: "POST", body: { studentId, status: "late", entitlementId: entitlementIds[1] }, ...auth(s, c) }), { params: Promise.resolve({ id: occId2 }) });
+  const res = await POST(await makeRequest(`/api/admin/occurrences/${occId2}/attendance?academyId=${ACADEMY_A_ID}`, { method: "POST", body: { studentId, status: "present", entitlementId: entitlementIds[1] }, ...auth(s, c) }), { params: Promise.resolve({ id: occId2 }) });
   expect(res.status).toBe(201);
   // Entitlement 1 should be completed.
   const ent = await db.query<{ status: string }>(`SELECT status FROM session_entitlements WHERE id = $1;`, [entitlementIds[1]!]);
@@ -242,6 +290,13 @@ test("POST attendance 'absent' does NOT consume skip or change entitlement", asy
   // No 'completed' event for this entitlement.
   const ev = await db.query<{ c: number }>(`SELECT COUNT(*)::int AS c FROM entitlement_events WHERE entitlement_id = $1 AND event_type = 'completed';`, [entitlementIds[2]!]);
   expect((ev.rows[0] as { c: number }).c).toBe(0);
+});
+
+test("POST attendance rejects an entitlement assigned to another occurrence", async () => {
+  const { s, c } = await login(adminA.email, adminA.password);
+  const { POST } = await import("@/app/api/admin/occurrences/[id]/attendance/route");
+  const res = await POST(await makeRequest(`/api/admin/occurrences/${occId2}/attendance?academyId=${ACADEMY_A_ID}`, { method: "POST", body: { studentId, status: "present", entitlementId: entitlementIds[0] }, ...auth(s, c) }), { params: Promise.resolve({ id: occId2 }) });
+  expect(res.status).toBe(404);
 });
 
 // === PATCH update attendance ============================================
@@ -288,10 +343,10 @@ test("PATCH attendance rejects cross-academy (404)", async () => {
 test("POST correct changes status with reason (200) + audit with reason", async () => {
   const { s, c } = await login(adminA.email, adminA.password);
   const { POST } = await import("@/app/api/admin/attendance/[id]/correct/route");
-  const res = await POST(await makeRequest(`/api/admin/attendance/${attendanceId}/correct?academyId=${ACADEMY_A_ID}`, { method: "POST", body: { status: "late", reason: "Wrong status recorded" }, ...auth(s, c) }), { params: Promise.resolve({ id: attendanceId }) });
+  const res = await POST(await makeRequest(`/api/admin/attendance/${attendanceId}/correct?academyId=${ACADEMY_A_ID}`, { method: "POST", body: { status: "absent", reason: "Wrong status recorded" }, ...auth(s, c) }), { params: Promise.resolve({ id: attendanceId }) });
   expect(res.status).toBe(200);
   const ar = await db.query<{ status: string }>(`SELECT status FROM attendance_records WHERE id = $1;`, [attendanceId]);
-  expect((ar.rows[0] as { status: string }).status).toBe("late");
+  expect((ar.rows[0] as { status: string }).status).toBe("absent");
   const audit = await db.query<{ reason: string | null }>(`SELECT reason FROM audit_events WHERE action = 'attendance.correct' AND target_id = $1;`, [attendanceId]);
   expect((audit.rows[0] as { reason: string | null }).reason).toBe("Wrong status recorded");
 });
@@ -299,21 +354,21 @@ test("POST correct changes status with reason (200) + audit with reason", async 
 test("POST correct rejects empty reason (422)", async () => {
   const { s, c } = await login(adminA.email, adminA.password);
   const { POST } = await import("@/app/api/admin/attendance/[id]/correct/route");
-  const res = await POST(await makeRequest(`/api/admin/attendance/${attendanceId}/correct?academyId=${ACADEMY_A_ID}`, { method: "POST", body: { status: "late", reason: "" }, ...auth(s, c) }), { params: Promise.resolve({ id: attendanceId }) });
+  const res = await POST(await makeRequest(`/api/admin/attendance/${attendanceId}/correct?academyId=${ACADEMY_A_ID}`, { method: "POST", body: { status: "present", reason: "" }, ...auth(s, c) }), { params: Promise.resolve({ id: attendanceId }) });
   expect(res.status).toBe(422);
 });
 
 test("POST correct rejects coach (403)", async () => {
   const { s, c } = await login(coachA.email, coachA.password);
   const { POST } = await import("@/app/api/admin/attendance/[id]/correct/route");
-  const res = await POST(await makeRequest(`/api/admin/attendance/${attendanceId}/correct?academyId=${ACADEMY_A_ID}`, { method: "POST", body: { status: "late", reason: "fix" }, ...auth(s, c) }), { params: Promise.resolve({ id: attendanceId }) });
+  const res = await POST(await makeRequest(`/api/admin/attendance/${attendanceId}/correct?academyId=${ACADEMY_A_ID}`, { method: "POST", body: { status: "present", reason: "fix" }, ...auth(s, c) }), { params: Promise.resolve({ id: attendanceId }) });
   expect(res.status).toBe(403);
 });
 
 test("POST correct rejects without CSRF (403)", async () => {
   const { s } = await login(adminA.email, adminA.password);
   const { POST } = await import("@/app/api/admin/attendance/[id]/correct/route");
-  const res = await POST(await makeRequest(`/api/admin/attendance/${attendanceId}/correct?academyId=${ACADEMY_A_ID}`, { method: "POST", body: { status: "late", reason: "fix" }, cookies: { [sessionCookieName()]: s } }), { params: Promise.resolve({ id: attendanceId }) });
+  const res = await POST(await makeRequest(`/api/admin/attendance/${attendanceId}/correct?academyId=${ACADEMY_A_ID}`, { method: "POST", body: { status: "present", reason: "fix" }, cookies: { [sessionCookieName()]: s } }), { params: Promise.resolve({ id: attendanceId }) });
   expect(res.status).toBe(403);
 });
 

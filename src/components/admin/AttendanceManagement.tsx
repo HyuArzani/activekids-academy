@@ -9,7 +9,6 @@ import {
   CalendarDays,
   CheckCircle2,
   XCircle,
-  Clock,
   UserX,
   Save,
   Users,
@@ -47,7 +46,8 @@ interface RosterStudent {
   effective_from: string;
   effective_to: string | null;
   attendance_id: string | null;
-  attendance_status: "present" | "absent" | "excused" | "late" | null;
+  attendance_status: "present" | "absent" | "excused" | null;
+  attendance_legacy_status?: "late" | null;
   notes: string | null;
 }
 
@@ -64,7 +64,7 @@ interface RosterResponse {
   roster: RosterStudent[];
 }
 
-type AttendanceStatus = "present" | "absent" | "excused" | "late";
+type AttendanceStatus = "present" | "absent" | "excused";
 
 type ListState =
   | { status: "loading" }
@@ -143,12 +143,6 @@ const STATUS_META: Record<
     active: "bg-rose-600 text-white hover:bg-rose-700 border-rose-600",
     idle: "bg-background text-rose-700 hover:bg-rose-50 border-rose-200 dark:text-rose-400 dark:hover:bg-rose-950",
   },
-  late: {
-    label: "Terlambat",
-    icon: Clock,
-    active: "bg-amber-500 text-white hover:bg-amber-600 border-amber-500",
-    idle: "bg-background text-amber-700 hover:bg-amber-50 border-amber-200 dark:text-amber-400 dark:hover:bg-amber-950",
-  },
   excused: {
     label: "Izin",
     icon: UserX,
@@ -157,7 +151,7 @@ const STATUS_META: Record<
   },
 };
 
-const ALL_STATUSES: AttendanceStatus[] = ["present", "absent", "late", "excused"];
+const ALL_STATUSES: AttendanceStatus[] = ["present", "absent", "excused"];
 
 // ============================================================================
 // Shared fetch helper (matches the pattern in AdminShell)
@@ -704,7 +698,7 @@ export function AttendanceRoster({ occurrenceId, academyId, onBack }: Attendance
   const roster = data.roster;
 
   // Aggregate counts from current drafts (so the header summary updates live).
-  const counts: Record<AttendanceStatus, number> = { present: 0, absent: 0, late: 0, excused: 0 };
+  const counts: Record<AttendanceStatus, number> = { present: 0, absent: 0, excused: 0 };
   let unrecorded = 0;
   for (const s of roster) {
     const d = drafts[s.student_id];
@@ -743,9 +737,8 @@ export function AttendanceRoster({ occurrenceId, academyId, onBack }: Attendance
           </div>
         </CardHeader>
         <CardContent>
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
             <SummaryStat label="Hadir" value={counts.present} color="emerald" />
-            <SummaryStat label="Terlambat" value={counts.late} color="amber" />
             <SummaryStat label="Tidak Hadir" value={counts.absent} color="rose" />
             <SummaryStat label="Izin" value={counts.excused} color="sky" />
             <SummaryStat label="Belum tercatat" value={unrecorded} color="muted" />
@@ -784,7 +777,7 @@ export function AttendanceRoster({ occurrenceId, academyId, onBack }: Attendance
                         <p className="font-medium leading-tight">{draft.fullName}</p>
                         {draft.attendanceId && (
                           <p className="mt-0.5 text-xs text-muted-foreground">
-                            Sebelumnya: {student.attendance_status ? (STATUS_META[student.attendance_status]?.label ?? student.attendance_status) : "—"}
+                            Sebelumnya: {student.attendance_legacy_status === "late" ? "Terlambat (data lama)" : student.attendance_status ? (STATUS_META[student.attendance_status as AttendanceStatus]?.label ?? student.attendance_status) : "—"}
                           </p>
                         )}
                         <Textarea

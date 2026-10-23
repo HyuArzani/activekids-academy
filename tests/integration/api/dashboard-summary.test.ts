@@ -131,9 +131,9 @@ async function enroll(student: string, effectiveFrom: string, effectiveTo: strin
 // Helper: record attendance for a student at an occurrence.
 async function recordAtt(occId: string, student: string, status: "present" | "absent" | "excused" | "late"): Promise<void> {
   await db.query(
-    `INSERT INTO attendance_records (id, training_occurrence_id, student_id, status, recorded_by)
-     VALUES ($1, $2, $3, $4, $5);`,
-    [randomUUID(), occId, student, status, adminA.id],
+    `INSERT INTO attendance_records (id, training_occurrence_id, student_id, status, legacy_status, recorded_by)
+     VALUES ($1, $2, $3, $4, $5, $6);`,
+    [randomUUID(), occId, student, status === "late" ? "present" : status, status === "late" ? "late" : null, adminA.id],
   );
 }
 

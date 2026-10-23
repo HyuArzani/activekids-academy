@@ -1,0 +1,27 @@
+# Local environment files and secrets
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# Dependencies and generated build output
+node_modules/
+.next/
+out/
+dist/
+coverage/
+playwright-report/
+test-results/
+dev.log
+*.log
+
+# Local database files
+/db/pglite/
+*.db
+*.sqlite
+
+# Operating system/editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

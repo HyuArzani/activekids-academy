@@ -93,6 +93,14 @@ test("Production rejects placeholder SESSION_SECRET", async () => {
   expect(() => envModule.isProd()).toThrow(/placeholder secret/);
 });
 
+test("Production rejects the committed environment-template secret", async () => {
+  process.env.NODE_ENV = "production";
+  process.env.DATABASE_URL = "postgres://user:***@host:5432/db";
+  process.env.SESSION_SECRET = "replace_with_random_secret_at_least_32_chars";
+  process.env.CSRF_SECRET = "b".repeat(64);
+  const envModule = await import("@/lib/env");
+  expect(() => envModule.isProd()).toThrow(/placeholder secret/);
+});
 test("Development accepts non-PostgreSQL DATABASE_URL (PgLite fallback OK in dev)", async () => {
   process.env.NODE_ENV = "development";
   process.env.DATABASE_URL = "file:/path/to/db";

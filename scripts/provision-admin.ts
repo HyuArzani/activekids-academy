@@ -9,11 +9,8 @@
  *
  * The script:
  *   1. Reads INITIAL_ADMIN_EMAIL from env (required).
- *   2. Prompts for the initial password on stdin (hidden input).
- *      Alternatively, reads from INITIAL_ADMIN_PASSWORD env var (for
- *      automated provisioning; less secure because env vars may leak
- *      into process listings).
- *   3. If the academy (slug="default") doesn't exist, creates it.
+ *   2. Prompts for the initial password on an interactive TTY (hidden input).
+ *   3. Requires the seeded academy (slug="default") to exist.
  *   4. If the user doesn't exist, creates them with
  *      `must_change_password=true` (so the admin is forced to set a
  *      fresh password on first login).
@@ -33,118 +30,93 @@
  *     hijacking an existing admin account).
  */
 
-import { createInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
-import { PGlite } from "@electric-sql/pglite";
 import { loadEnv } from "@/lib/env";
+import { getDb } from "@/lib/db";
 import { hashPassword, paramsToJson } from "@/lib/auth/password";
 import { AppError } from "@/lib/errors";
 
-const ACADEMY_ID = "00000000-0000-0000-0000-000000000001"; // matches seed
 const ACADEMY_SLUG = "default";
 
 async function promptPassword(): Promise<string> {
+  if (!process.stdin.isTTY || typeof process.stdin.setRawMode !== "function") {
+    throw new AppError({ code: "CONFIG_INVALID", message: "Admin provisioning requires an interactive TTY for hidden password input." });
+  }
+  process.stdout.write("Enter initial admin password (min 8 chars): ");
+  process.stdin.setRawMode(true);
+  process.stdin.resume();
+  process.stdin.setEncoding("utf8");
   return new Promise((resolve, reject) => {
-    const rl = createInterface({ input: process.stdin, output: process.stdout });
-    // Note: Node's readline doesn't natively hide input. For a real CLI,
-    // we'd use `sudo`'s prompt or a TTY library. For this sandbox, we
-    // accept the limitation and document it. The env-var path is available
-    // for automated provisioning.
-    rl.question("Enter initial admin password (min 8 chars): ", (answer) => {
-      rl.close();
-      resolve(answer.trim());
-    });
-    rl.on("error", reject);
+    let answer = "";
+    const cleanup = () => {
+      process.stdin.setRawMode(false);
+      process.stdin.pause();
+      process.stdin.removeListener("data", onData);
+    };
+    const onData = (chunk: string) => {
+      for (const char of chunk) {
+        if (char === "\u0003") {
+          cleanup();
+          process.stdout.write("\n");
+          reject(new Error("Provisioning cancelled."));
+          return;
+        }
+        if (char.charCodeAt(0) === 13 || char.charCodeAt(0) === 10) {
+          cleanup();
+          process.stdout.write("\n");
+          resolve(answer);
+          return;
+        }
+        if (char === "\u007f" || char.charCodeAt(0) === 8) answer = answer.slice(0, -1);
+        else answer += char;
+      }
+    };
+    process.stdin.on("data", onData);
   });
 }
 
 async function main() {
-  loadEnv();
   const env = loadEnv();
-  const email = env.INITIAL_ADMIN_EMAIL?.trim();
-  if (!email) {
-    throw new AppError({
-      code: "CONFIG_INVALID",
-      message: "INITIAL_ADMIN_EMAIL env var is required to provision the initial admin.",
-    });
+  const email = env.INITIAL_ADMIN_EMAIL.trim().toLowerCase();
+  if (!email) throw new AppError({ code: "CONFIG_INVALID", message: "INITIAL_ADMIN_EMAIL env var is required." });
+  if (!env.DATABASE_URL || !/^postgres(?:ql)?:\/\//i.test(env.DATABASE_URL)) {
+    throw new AppError({ code: "CONFIG_INVALID", message: "Admin provisioning requires DATABASE_URL targeting PostgreSQL; PgLite fallback is disabled." });
+  }
+  if (env.TEST_DATABASE_URL.trim()) {
+    throw new AppError({ code: "CONFIG_INVALID", message: "Unset TEST_DATABASE_URL before provisioning an Admin; it takes precedence over DATABASE_URL." });
   }
 
-  const password = process.env.INITIAL_ADMIN_PASSWORD?.trim() || (await promptPassword());
-  if (password.length < 8) {
-    throw new AppError({
-      code: "VALIDATION_FAILED",
-      message: "Password must be at least 8 characters.",
-    });
-  }
+  const password = await promptPassword();
+  if (password.length < 8) throw new AppError({ code: "VALIDATION_FAILED", message: "Password must be at least 8 characters." });
 
-  const pg = new PGlite(env.PGLITE_DATA_DIR || undefined, {
-    // Reuse the same pre-loaded artifacts as the adapter for consistency.
-    // (PGlite options are documented; this is the intended API.)
-  });
+  const db = getDb();
   try {
-    // Ensure the academy exists (matches the seed).
-    await pg.query(
-      `INSERT INTO academies (id, name, slug, timezone, is_active)
-       VALUES ($1, 'Futsal Academy Default', $2, 'Asia/Jakarta', true)
-       ON CONFLICT (id) DO NOTHING;`,
-      [ACADEMY_ID, ACADEMY_SLUG],
-    );
+    const academyResult = await db.query<{ id: string }>("SELECT id FROM academies WHERE slug = $1 AND is_active = true LIMIT 1;", [ACADEMY_SLUG]);
+    const academyId = academyResult.rows[0]?.id;
+    if (!academyId) throw new AppError({ code: "CONFIG_INVALID", message: "Seed the target PostgreSQL database before provisioning an Admin." });
 
-    // Check if the user already exists.
-    const existing = await pg.query<{ id: string; email: string }>(
-      `SELECT id, email FROM users WHERE email = $1;`,
-      [email],
-    );
-    let userId: string;
-    if (existing.rows.length > 0) {
-      userId = (existing.rows[0] as { id: string }).id;
-      console.info(`User ${email} already exists (id=${userId}). NOT overwriting password.`);
-      console.info("If you need to reset the password, use the admin tools (Phase 4 scope).");
-    } else {
-      userId = randomUUID();
-      const hash = await hashPassword(password);
-      await pg.query("BEGIN;");
-      try {
-        await pg.query(
-          `INSERT INTO users (id, email, status, must_change_password)
-           VALUES ($1, $2, 'active', true);`,
-          [userId, email],
-        );
-        await pg.query(
-          `INSERT INTO user_credentials (user_id, argon2id_hash, argon2_params)
-           VALUES ($1, $2, $3);`,
-          [userId, hash, JSON.stringify(paramsToJson())],
-        );
-        await pg.query("COMMIT;");
-        console.info(`Created user ${email} (id=${userId}) with must_change_password=true.`);
-      } catch (err) {
-        await pg.query("ROLLBACK;").catch(() => {});
-        throw err;
+    const hash = await hashPassword(password);
+    const result = await db.withTxSerializable(async (tx) => {
+      const existing = await tx.query<{ id: string }>("SELECT id FROM users WHERE lower(email) = $1 FOR UPDATE;", [email]);
+      let userId = existing.rows[0]?.id;
+      if (!userId) {
+        userId = randomUUID();
+        await tx.query("INSERT INTO users (id, email, status, must_change_password) VALUES ($1, $2, 'active', true);", [userId, email]);
+        await tx.query("INSERT INTO user_credentials (user_id, argon2id_hash, argon2_params) VALUES ($1, $2, $3);", [userId, hash, JSON.stringify(paramsToJson())]);
       }
-    }
-
-    // Create the academy_membership (admin role) if it doesn't exist.
-    const membershipId = randomUUID();
-    const membershipResult = await pg.query(
-      `INSERT INTO academy_memberships (id, user_id, academy_id, role, status)
-       VALUES ($1, $2, $3, 'admin', 'active')
-       ON CONFLICT (user_id, academy_id, role) DO NOTHING
-       RETURNING id;`,
-      [membershipId, userId, ACADEMY_ID],
-    );
-    if ((membershipResult.rows ?? []).length > 0) {
-      console.info(`Created admin membership for ${email} in academy ${ACADEMY_ID}.`);
-    } else {
-      console.info(`Admin membership already exists for ${email} (idempotent).`);
-    }
-
-    console.info("PROVISION_OK");
-    console.info("");
-    console.info("The admin must log in and change their password immediately.");
-    console.info("Login endpoint: POST /api/auth/login");
-    console.info("Change password: POST /api/auth/change-password");
+      const membership = await tx.query(
+        `INSERT INTO academy_memberships (id, user_id, academy_id, role, status)
+         VALUES ($1, $2, $3, 'admin', 'active')
+         ON CONFLICT (user_id, academy_id, role) DO NOTHING RETURNING id;`,
+        [randomUUID(), userId, academyId],
+      );
+      return { createdUser: !existing.rows[0], createdMembership: membership.rowCount > 0 };
+    });
+    console.info(result.createdUser ? "Created initial Admin user." : "User already exists; password was not changed.");
+    console.info(result.createdMembership ? "Created Admin academy membership." : "Admin membership already exists.");
+    console.info("PROVISION_OK — log in and change the initial password.");
   } finally {
-    await pg.close().catch(() => {});
+    await db.close();
   }
 }
 

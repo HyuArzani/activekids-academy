@@ -109,6 +109,7 @@ export interface AttendanceReportEntry {
   className: string;
   startAt: string; // ISO
   status: string;
+  legacyStatus: string | null;
   notes: string | null;
   recordedAt: string; // ISO
 }
@@ -161,6 +162,7 @@ export async function getPerStudentAttendanceReport(
             c.name AS "className",
             to_char(tocc.start_at AT TIME ZONE 'Asia/Jakarta', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS "startAt",
             ar.status,
+            ar.legacy_status AS "legacyStatus",
             ar.notes,
             to_char(ar.recorded_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS "recordedAt"
        FROM attendance_records ar
@@ -175,10 +177,10 @@ export async function getPerStudentAttendanceReport(
   const records = result.rows as AttendanceReportEntry[];
   const summary: AttendanceReportSummary = {
     total: records.length,
-    present: records.filter((r) => r.status === "present").length,
+    present: records.filter((r) => r.status === "present" && r.legacyStatus !== "late").length,
     absent: records.filter((r) => r.status === "absent").length,
     excused: records.filter((r) => r.status === "excused").length,
-    late: records.filter((r) => r.status === "late").length,
+    late: records.filter((r) => r.legacyStatus === "late").length,
     attendanceRate: 0,
   };
   summary.attendanceRate =

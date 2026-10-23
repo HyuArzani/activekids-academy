@@ -12,29 +12,24 @@
  *     internally — the admin is expected to invoke it separately when
  *     recording an excused absence that should also release the
  *     occurrence assignment. (See "Known ambiguity" note below.)
- *   - 'late' → entitlement status = 'completed'
+ *   - legacy 'late' rows are migrated to 'present' with the former value retained in `legacy_status`
  *
  * Academy scoping: the occurrence, student, and entitlement (if any) must
  * all belong to the principal's academy.
  *
  * === Known ambiguity (preserved, not invented) ============================
  *
- * The existing `recordAttendance` couples 'present'/'late' attendance to
- * an entitlement transition (active → completed) but provides NO revert
+ * The existing `recordAttendance` couples 'present' attendance to an
+ * entitlement transition (active → completed) but provides NO revert
  * path when status later changes to 'absent' or 'excused'. Corrections
  * (`updateAttendance`, `correctAttendance`) follow the SAME forward-only
- * rule: present/late → completed (if active); absent/excused → no change.
+ * rule: present → completed (if active); absent/excused → no change.
  * Reverting a completed entitlement to active on a status correction is
  * NOT implemented because no existing domain service defines that
  * transition, and inventing one is out of scope (Stage 4 boundary).
  *
- * Additionally, `recordAttendance` accepts an `entitlementId` without
- * verifying that the entitlement's `assigned_occurrence_id` matches the
- * occurrence being attended. This is a pre-existing design decision; we
- * preserve it rather than introduce a new coupling that could break
- * existing behavior.
- *
- * Both points are flagged for future stage review.
+ * When an entitlement is supplied, it must belong to the same student and
+ * be assigned to this occurrence before attendance can complete it.
  */
 
 import type { DbClient, TxClient } from "@/lib/db";
@@ -43,11 +38,13 @@ import { Err } from "@/lib/errors";
 import { writeAudit } from "@/lib/audit/writer";
 import type { Principal } from "@/lib/auth/principal";
 import { requireRole } from "@/lib/auth/principal";
+import { isAttendanceHistoryLocked, type AttendanceStatus } from "./attendance-policy";
 import {
   requireAcademyContext,
   loadOccurrenceInAcademy,
   loadStudentInAcademy,
   loadEntitlementInAcademy,
+  loadStudentPackageInAcademy,
   newId,
   type TrainingOccurrenceRow,
 } from "./helpers";
@@ -59,7 +56,8 @@ export interface AttendanceRow {
   training_occurrence_id: string;
   student_id: string;
   entitlement_id: string | null;
-  status: "present" | "absent" | "excused" | "late";
+  status: AttendanceStatus;
+  legacy_status?: "late" | null;
   recorded_by: string;
   recorded_at: Date;
   notes: string | null;
@@ -109,18 +107,15 @@ async function verifyEnrollmentOnDate(
 }
 
 /**
- * Apply the existing attendance→entitlement rule: if status is 'present'
- * or 'late' AND the entitlement is currently 'active', mark it 'completed'
- * and record a 'completed' entitlement event. No revert path for
- * 'absent'/'excused' (see "Known ambiguity" above).
+ * Apply the existing attendance→entitlement rule: only 'present' with an active entitlement marks it completed; 'absent' and 'excused' do not consume the entitlement.
  */
 async function applyEntitlementTransition(
   tx: TxClient,
   entitlementId: string | null,
-  status: "present" | "absent" | "excused" | "late",
+  status: AttendanceStatus,
   actorUserId: string,
 ): Promise<void> {
-  if (!entitlementId || (status !== "present" && status !== "late")) {
+  if (!entitlementId || status !== "present") {
     return;
   }
   await tx.query(
@@ -142,7 +137,7 @@ async function applyEntitlementTransition(
 export interface RecordAttendanceInput {
   occurrenceId: string;
   studentId: string;
-  status: "present" | "absent" | "excused" | "late";
+  status: AttendanceStatus;
   entitlementId?: string;
   notes?: string;
 }
@@ -154,17 +149,49 @@ export async function recordAttendance(
   db: DbClient = getDb(),
 ): Promise<{ attendanceId: string }> {
   requireAcademyContext(principal, academyId);
+  if (!principal.memberships.some((m) => m.academyId === academyId && (m.role === "admin" || m.role === "coach"))) {
+    throw Err.forbidden("Admin or Coach role required to record attendance.");
+  }
 
   // Validate academy scoping.
   const occ = await loadOccurrenceInAcademy(db, input.occurrenceId, academyId);
   await loadStudentInAcademy(db, input.studentId, academyId);
   if (input.entitlementId) {
-    await loadEntitlementInAcademy(db, input.entitlementId, academyId);
+    const entitlement = await loadEntitlementInAcademy(db, input.entitlementId, academyId);
+    const studentPackage = await loadStudentPackageInAcademy(db, entitlement.student_package_id, academyId);
+    if (studentPackage.student_id !== input.studentId || entitlement.assigned_occurrence_id !== input.occurrenceId) {
+      throw Err.notFound("Entitlement not found for this student and occurrence.");
+    }
   }
 
   return db.withTxSerializable(async (tx) => {
+    if (input.entitlementId) {
+      // Lock the entitlement before the occurrence (matching entitlement
+      // assignment's lock order), then revalidate the relationship atomically.
+      await tx.query(`SELECT id FROM session_entitlements WHERE id = $1 FOR UPDATE;`, [input.entitlementId]);
+      const entitlement = await loadEntitlementInAcademy(tx, input.entitlementId, academyId);
+      const studentPackage = await loadStudentPackageInAcademy(tx, entitlement.student_package_id, academyId);
+      if (studentPackage.student_id !== input.studentId || entitlement.assigned_occurrence_id !== input.occurrenceId) {
+        throw Err.notFound("Entitlement not found for this student and occurrence.");
+      }
+    }
     // Lock the occurrence to prevent concurrent attendance writes.
     await tx.query(`SELECT id FROM training_occurrences WHERE id = $1 FOR UPDATE;`, [input.occurrenceId]);
+    if (isAttendanceHistoryLocked(occ.occurrence_date)) {
+      throw Err.forbidden("Attendance is locked seven days after the occurrence; use Admin correction for historical records.");
+    }
+
+    if (principal.memberships.some((m) => m.academyId === academyId && m.role === "coach") && !principal.memberships.some((m) => m.academyId === academyId && m.role === "admin")) {
+      const assignment = await tx.query<{ id: string }>(
+        `SELECT csa.id FROM coach_student_assignments csa
+          JOIN training_occurrences tocc ON tocc.id = $3
+         WHERE csa.coach_user_id = $1 AND csa.student_id = $2
+           AND csa.is_active = true AND (csa.class_id IS NULL OR csa.class_id = tocc.class_id)
+         LIMIT 1;`,
+        [principal.userId, input.studentId, input.occurrenceId],
+      );
+      if (!assignment.rows[0]) throw Err.forbidden("Coach is not assigned to this student and occurrence.");
+    }
 
     // Verify enrollment eligibility on the occurrence date.
     await verifyEnrollmentOnDate(tx, input.studentId, occ.class_id, occ.occurrence_date);
@@ -182,7 +209,7 @@ export async function recordAttendance(
       throw Err.conflict("Attendance already recorded for this student at this occurrence.");
     }
 
-    // Apply the existing entitlement transition rule (present/late → completed).
+    // Only present attendance completes a linked entitlement.
     await applyEntitlementTransition(tx, input.entitlementId ?? null, input.status, principal.userId);
 
     await writeAudit({
@@ -207,7 +234,7 @@ export async function recordAttendance(
 // === Update attendance (regular, no reason required) ======================
 
 export interface UpdateAttendanceInput {
-  status?: "present" | "absent" | "excused" | "late";
+  status?: AttendanceStatus;
   notes?: string | null;
 }
 
@@ -216,7 +243,7 @@ export interface UpdateAttendanceInput {
  * require a reason (use `correctAttendance` for historical corrections
  * that require an audit trail with a reason).
  *
- * If `status` changes to 'present'/'late' and a linked entitlement is
+ * If `status` changes to 'present' and a linked entitlement is
  * 'active', the entitlement is marked 'completed' (same forward-only
  * rule as `recordAttendance`). No revert for 'absent'/'excused'.
  *
@@ -231,6 +258,9 @@ export async function updateAttendance(
   db: DbClient = getDb(),
 ): Promise<void> {
   requireAcademyContext(principal, academyId);
+  if (!principal.memberships.some((m) => m.academyId === academyId && (m.role === "admin" || m.role === "coach"))) {
+    throw Err.forbidden("Admin or Coach role required to update attendance.");
+  }
 
   if (input.status === undefined && input.notes === undefined) {
     throw Err.validation("Nothing to update (provide status and/or notes).");
@@ -239,10 +269,24 @@ export async function updateAttendance(
   return db.withTxSerializable(async (tx) => {
     // Lock + load the attendance record (academy-scoped via JOIN).
     const record = await loadAttendanceInAcademy(tx, attendanceId, academyId);
+    const occurrence = await loadOccurrenceInAcademy(tx, record.training_occurrence_id, academyId);
+    if (isAttendanceHistoryLocked(occurrence.occurrence_date)) {
+      throw Err.forbidden("Regular attendance updates are locked seven days after the occurrence; use Admin correction.");
+    }
+    if (principal.memberships.some((m) => m.academyId === academyId && m.role === "coach") && !principal.memberships.some((m) => m.academyId === academyId && m.role === "admin")) {
+      const assignment = await tx.query<{ id: string }>(
+        `SELECT csa.id FROM coach_student_assignments csa
+          WHERE csa.coach_user_id = $1 AND csa.student_id = $2 AND csa.is_active = true
+            AND (csa.class_id IS NULL OR csa.class_id = $3) LIMIT 1;`,
+        [principal.userId, record.student_id, occurrence.class_id],
+      );
+      if (!assignment.rows[0]) throw Err.forbidden("Coach is not assigned to this student and occurrence.");
+    }
     await tx.query(`SELECT id FROM attendance_records WHERE id = $1 FOR UPDATE;`, [record.id]);
 
     const beforeState = {
       status: record.status,
+      legacy_status: record.legacy_status ?? null,
       notes: record.notes,
     };
 
@@ -251,6 +295,7 @@ export async function updateAttendance(
     if (input.status !== undefined) {
       params.push(input.status);
       sets.push(`status = $${params.length}`);
+      sets.push("legacy_status = NULL");
     }
     if (input.notes !== undefined) {
       params.push(input.notes);
@@ -262,8 +307,8 @@ export async function updateAttendance(
       params,
     );
 
-    // If status changed to present/late, apply the forward entitlement rule.
-    if (input.status !== undefined && (input.status === "present" || input.status === "late")) {
+    // Only present completes an entitlement.
+    if (input.status === "present") {
       await applyEntitlementTransition(tx, record.entitlement_id, input.status, principal.userId);
     }
 
@@ -277,6 +322,7 @@ export async function updateAttendance(
       before: beforeState,
       after: {
         status: input.status ?? beforeState.status,
+        legacy_status: input.status === undefined ? beforeState.legacy_status : null,
         notes: input.notes === undefined ? beforeState.notes : input.notes,
       },
     });
@@ -286,7 +332,7 @@ export async function updateAttendance(
 // === Correct historical attendance (admin, reason required) =============
 
 export interface CorrectAttendanceInput {
-  status: "present" | "absent" | "excused" | "late";
+  status: AttendanceStatus;
   reason: string;
   notes?: string | null;
 }
@@ -297,7 +343,7 @@ export interface CorrectAttendanceInput {
  * transaction.
  *
  * Same forward-only entitlement rule as `recordAttendance`:
- * present/late → completed (if active); absent/excused → no revert.
+ * present → completed (if active); absent/excused → no revert.
  *
  * Invariant #9: admin corrections require admin role + non-empty reason
  * + audit (analogous to `adminCorrect` in entitlements.ts).
@@ -322,10 +368,11 @@ export async function correctAttendance(
 
     const beforeState = {
       status: record.status,
+      legacy_status: record.legacy_status ?? null,
       notes: record.notes,
     };
 
-    const sets: string[] = ["status = $2", "updated_at = now()"];
+    const sets: string[] = ["status = $2", "legacy_status = NULL", "updated_at = now()"];
     const params: unknown[] = [record.id, input.status];
     if (input.notes !== undefined) {
       params.push(input.notes);
@@ -337,8 +384,8 @@ export async function correctAttendance(
       params,
     );
 
-    // Apply the forward entitlement rule for present/late.
-    if (input.status === "present" || input.status === "late") {
+    // Only present completes an entitlement.
+    if (input.status === "present") {
       await applyEntitlementTransition(tx, record.entitlement_id, input.status, principal.userId);
     }
 
@@ -350,7 +397,11 @@ export async function correctAttendance(
       targetType: "attendance_records",
       targetId: record.id,
       before: beforeState,
-      after: { status: input.status, notes: input.notes ?? beforeState.notes },
+      after: {
+        status: input.status,
+        legacy_status: null,
+        notes: input.notes ?? beforeState.notes,
+      },
       reason: input.reason,
     });
   });
@@ -365,7 +416,9 @@ export interface OccurrenceRosterEntry {
   effective_from: Date;
   effective_to: Date | null;
   attendance_id: string | null;
-  attendance_status: "present" | "absent" | "excused" | "late" | null;
+  attendance_status: AttendanceStatus | null;
+  attendance_legacy_status?: "late" | null;
+  notes: string | null;
 }
 
 /**
@@ -387,7 +440,8 @@ export async function getOccurrenceRoster(
   const result = await db.query<OccurrenceRosterEntry>(
     `SELECT s.id AS student_id, s.full_name, se.id AS enrollment_id,
             se.effective_from, se.effective_to,
-            ar.id AS attendance_id, ar.status AS attendance_status
+            ar.id AS attendance_id, ar.status AS attendance_status,
+            ar.legacy_status AS attendance_legacy_status, ar.notes
        FROM student_enrollments se
        JOIN students s ON s.id = se.student_id
   LEFT JOIN attendance_records ar
@@ -421,7 +475,7 @@ export async function listAttendanceForStudent(
 
   const result = await db.query<AttendanceWithDetails>(
     `SELECT ar.id, ar.training_occurrence_id, ar.student_id, ar.entitlement_id,
-            ar.status, ar.recorded_by, ar.recorded_at, ar.notes,
+            ar.status, ar.legacy_status, ar.recorded_by, ar.recorded_at, ar.notes,
             ar.created_at, ar.updated_at,
             tocc.occurrence_date, tocc.start_at AS occurrence_start_at,
             tocc.class_id, c.name AS class_name,
@@ -457,7 +511,7 @@ export async function listAttendanceForDateRange(
 
   const result = await db.query<AttendanceWithDetails>(
     `SELECT ar.id, ar.training_occurrence_id, ar.student_id, ar.entitlement_id,
-            ar.status, ar.recorded_by, ar.recorded_at, ar.notes,
+            ar.status, ar.legacy_status, ar.recorded_by, ar.recorded_at, ar.notes,
             ar.created_at, ar.updated_at,
             tocc.occurrence_date, tocc.start_at AS occurrence_start_at,
             tocc.class_id, c.name AS class_name,
@@ -505,7 +559,7 @@ export async function loadAttendanceInAcademy(
 ): Promise<AttendanceRow> {
   const result = await db.query<AttendanceRow>(
     `SELECT ar.id, ar.training_occurrence_id, ar.student_id, ar.entitlement_id,
-            ar.status, ar.recorded_by, ar.recorded_at, ar.notes,
+            ar.status, ar.legacy_status, ar.recorded_by, ar.recorded_at, ar.notes,
             ar.created_at, ar.updated_at
        FROM attendance_records ar
        JOIN training_occurrences tocc ON tocc.id = ar.training_occurrence_id
@@ -528,7 +582,7 @@ export async function loadAttendanceWithDetailsInAcademy(
 ): Promise<AttendanceWithDetails> {
   const result = await db.query<AttendanceWithDetails>(
     `SELECT ar.id, ar.training_occurrence_id, ar.student_id, ar.entitlement_id,
-            ar.status, ar.recorded_by, ar.recorded_at, ar.notes,
+            ar.status, ar.legacy_status, ar.recorded_by, ar.recorded_at, ar.notes,
             ar.created_at, ar.updated_at,
             tocc.occurrence_date, tocc.start_at AS occurrence_start_at,
             tocc.class_id, c.name AS class_name,

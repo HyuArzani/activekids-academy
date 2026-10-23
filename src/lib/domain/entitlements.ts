@@ -45,6 +45,7 @@ import {
   type TrainingOccurrenceRow,
 } from "./helpers";
 import { computeEntitlementBodyHash } from "./entitlement-idempotency";
+import { isAttendanceHistoryLocked } from "./attendance-policy";
 
 // === Bounded retry helper (Stage 9) =======================================
 
@@ -1090,6 +1091,10 @@ export async function moveEntitlement(
         occMap.set(occ.id, occ);
       }
       const destOcc = occMap.get(input.destinationOccurrenceId)!;
+      const sourceOcc = occMap.get(input.expectedCurrentOccurrenceId)!;
+      if (isAttendanceHistoryLocked(sourceOcc.occurrence_date)) {
+        throw Err.forbidden("Scheduling history is locked seven days after the occurrence.");
+      }
 
       // 8. Historical lock: destination must be in the future.
       if (new Date(destOcc.start_at).getTime() <= Date.now()) {
@@ -1233,7 +1238,18 @@ export async function parentSkipEntitlement(
         return JSON.parse(replay.result) as ParentSkipResult;
       }
 
-      // 5. Perform the skip (delegates to the shared core — same tx).
+      // Check the occurrence being released. At the seven-day Jakarta date boundary, scheduling history is locked.
+      if (entitlement.status !== "active") {
+        throw Err.conflict(`Cannot skip: entitlement status is '${entitlement.status}', must be 'active'.`, "invalid_status");
+      }
+      const assignedOccurrenceId = entitlement.assigned_occurrence_id;
+      if (assignedOccurrenceId === null) {
+        throw Err.conflict("Cannot skip: entitlement has no current occurrence assignment to release.", "no_assignment");
+      }
+      const currentOccurrence = await loadOccurrenceInAcademy(tx, assignedOccurrenceId, academyId);
+      if (isAttendanceHistoryLocked(currentOccurrence.occurrence_date)) {
+        throw Err.forbidden("Scheduling history is locked seven days after the occurrence.");
+      }
       const coreResult = await skipEntitlementCore(
         tx, principal, academyId, input.entitlementId, input.reason,
       );

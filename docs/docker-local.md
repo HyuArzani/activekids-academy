@@ -20,8 +20,13 @@ Buat file `.env.docker` di root proyek dengan konten berikut. Ganti nilai secret
 ```bash
 # .env.docker — JANGAN COMMIT file ini (sudah di-gitignore via .env*)
 
-# Database PostgreSQL (koneksi ke service 'db' di Compose)
-DATABASE_URL=postgresql://futsal:futsal_local_dev@db:5432/futsal_academy?sslmode=disable
+# PostgreSQL container credentials: choose a URL-safe local password.
+POSTGRES_USER=futsal
+POSTGRES_PASSWORD=replace_with_a_local_database_password
+POSTGRES_DB=futsal_academy
+
+# Database PostgreSQL (connection to Compose service 'db')
+DATABASE_URL=postgresql://futsal:replace_with_a_local_database_password@db:5432/futsal_academy?sslmode=disable
 
 # Auth secrets — WAJIB ≥32 karakter. Generate dengan: openssl rand -hex 32
 # JANGAN gunakan placeholder "replace_with_random_64_hex_chars" (ditolak di production).
@@ -45,10 +50,25 @@ openssl rand -hex 32  # untuk SESSION_SECRET
 openssl rand -hex 32  # untuk CSRF_SECRET
 ```
 
-## Langkah 2: Build Docker Image
+## Mode Development: Hot Reload
+
+Development memakai PostgreSQL container yang sama, bind mount source workspace, dan volume `/app/node_modules` terpisah. Saat container app mulai, `bun install --frozen-lockfile` menyelaraskan dependency dalam volume; restart app setelah mengubah `package.json` atau `bun.lock`. Salin `.env.example` ke `.env.docker`; set `POSTGRES_PASSWORD`, samakan password di `DATABASE_URL`, dan ganti kedua secret dengan nilai acak minimal 32 karakter. File lokal `.env.docker` tidak ikut Docker build context.
 
 ```bash
-docker compose build
+docker compose --env-file .env.docker -f docker-compose.yml -f docker-compose.dev.yml config --quiet
+docker compose --env-file .env.docker -f docker-compose.yml -f docker-compose.dev.yml up -d --build
+docker compose --env-file .env.docker -f docker-compose.yml -f docker-compose.dev.yml exec app bun run db:migrate
+docker compose --env-file .env.docker -f docker-compose.yml -f docker-compose.dev.yml exec app bun run db:seed
+```
+
+Akses `http://localhost:3000`. Perubahan source dari workspace lokal terpantau Next.js. PostgreSQL menggunakan named volume `futsal_academy_pg_data`; host port hanya terikat ke `127.0.0.1:5432`.
+
+## Mode Production-like: Build Docker Image
+
+
+
+```bash
+docker compose --env-file .env.docker build
 ```
 
 Build pertama akan memakan waktu beberapa menit (install dependencies + `next build`).
@@ -56,7 +76,7 @@ Build pertama akan memakan waktu beberapa menit (install dependencies + `next bu
 ## Langkah 3: Jalankan PostgreSQL + Aplikasi
 
 ```bash
-docker compose up -d
+docker compose --env-file .env.docker up -d
 ```
 
 Perintah ini:
@@ -66,37 +86,34 @@ Perintah ini:
 
 Cek status:
 ```bash
-docker compose ps
+docker compose --env-file .env.docker ps
 ```
 
 ## Langkah 4: Jalankan Migrasi Database
 
 ```bash
-docker compose exec app bun run db:migrate
+docker compose --env-file .env.docker exec app bun run db:migrate
 ```
 
-Ini menjalankan 16 file migrasi SQL (membuat semua tabel, index, constraint).
+Ini menjalankan seluruh file migrasi SQL yang belum diterapkan (schema, index, constraint, dan kebijakan attendance).
 
 ## Langkah 5: (Opsional) Jalankan Seed Data
 
 ```bash
-docker compose exec app bun run db:seed
+docker compose --env-file .env.docker exec app bun run db:seed
 ```
 
 Membuat data contoh: akademi, kelas (Semangat, Membara), paket (4 sesi, 8 sesi), jadwal.
 
 ## Langkah 6: Buat Admin Pertama
 
+Atur `INITIAL_ADMIN_EMAIL` di `.env.docker`, lalu jalankan dari terminal interaktif:
+
 ```bash
-docker compose exec app INITIAL_ADMIN_EMAIL=admin@futsal.local bun run provision-admin
+docker compose --env-file .env.docker exec -it app bun run provision-admin
 ```
 
-Script akan meminta password via stdin. Gunakan password yang aman (min 8 karakter).
-
-Alternatif (password via env, kurang aman):
-```bash
-docker compose exec -e INITIAL_ADMIN_EMAIL=admin@futsal.local -e INITIAL_ADMIN_PASSWORD=YourPassword123 app bun run provision-admin
-```
+Password diminta tanpa echo. Script harus diarahkan ke PostgreSQL Compose dan hanya berjalan setelah migration serta seed berhasil. User yang sudah ada tidak akan diganti password-nya.
 
 ## Langkah 7: Buka Aplikasi di Browser
 
@@ -112,35 +129,30 @@ Login dengan email + password yang Anda buat di Langkah 6.
 
 ```bash
 # Log aplikasi (real-time)
-docker compose logs -f app
+docker compose --env-file .env.docker logs -f app
 
 # Log PostgreSQL
-docker compose logs -f db
+docker compose --env-file .env.docker logs -f db
 
 # Semua log
-docker compose logs -f
+docker compose --env-file .env.docker logs -f
 ```
 
 ## Menghentikan dan Menjalankan Ulang (Data Tetap)
 
 ```bash
 # Hentikan (data PostgreSQL tetap di volume)
-docker compose down
+docker compose --env-file .env.docker down
 
 # Jalankan lagi
-docker compose up -d
+docker compose --env-file .env.docker up -d
 ```
 
 Data database, admin, siswa, dll. tetap ada setelah restart.
 
-## Menghapus Semua Data Lokal (PERINGATAN)
+Data database tetap disimpan pada named volume `futsal_academy_pg_data`. Panduan ini hanya memakai perintah stop yang mempertahankan data; jangan hapus volume jika database lokal masih dibutuhkan.
 
-```bash
-# HENTIKAN + HAPUS VOLUME (menghapus SEMUA data database — tidak bisa dibatalkan!)
-docker compose down -v
-```
-
-Gunakan ini hanya ketika Anda ingin memulai dari nol. Volume `futsal_academy_pg_data` akan dihapus.
+Jika named volume sudah pernah diinisialisasi, variabel `POSTGRES_USER`, `POSTGRES_DB`, dan `POSTGRES_PASSWORD` tidak mengubah role/database yang sudah ada. Jangan hapus volume untuk mengatasi login gagal. Pertahankan kredensial role yang sudah berlaku di `.env.docker`, atau ubah password role secara interaktif melalui `psql` (perintah `\password futsal`), lalu samakan `POSTGRES_PASSWORD` dan password pada `DATABASE_URL`.
 
 ## Mengakses PostgreSQL Langsung
 
@@ -151,20 +163,35 @@ PostgreSQL tersedia di `localhost:5432` (localhost-only):
 psql -h localhost -p 5432 -U futsal -d futsal_academy
 
 # Atau via Docker
-docker compose exec db psql -U futsal -d futsal_academy
+docker compose --env-file .env.docker exec db psql -U futsal -d futsal_academy
 ```
 
 ## Environment Variables yang Diperlukan
 
-| Variable | Wajib | Contoh | Keterangan |
-|---|---|---|---|
-| `DATABASE_URL` | Ya | `postgresql://futsal:futsal_local_dev@db:5432/futsal_academy?sslmode=disable` | Connection string PostgreSQL |
-| `SESSION_SECRET` | Ya | 64-char hex string | Secret untuk HMAC session token |
-| `CSRF_SECRET` | Ya | 64-char hex string | Secret untuk CSRF token HMAC |
-| `NODE_ENV` | Ya | `production` | Mode produksi (validasi secrets + DB URL) |
-| `ACADEMY_TIMEZONE` | Tidak | `Asia/Jakarta` | Default: Asia/Jakarta |
-| `DB_POOL_MAX` | Tidak | `5` | Pool size. Default: 10 |
-| `PGLITE_DATA_DIR` | Tidak | (kosong) | Tidak digunakan ketika DATABASE_URL di-set |
+| Variable | Wajib | Keterangan |
+|---|---|---|
+| `POSTGRES_PASSWORD` | Ya (Compose) | Password lokal Postgres; samakan dengan URL aplikasi. |
+| `POSTGRES_USER`, `POSTGRES_DB` | Opsional | Default Compose: `futsal`, `futsal_academy`. |
+| `DATABASE_URL` | Ya (Docker/production) | PostgreSQL URL; host `db` dari container app. |
+| `SESSION_SECRET`, `CSRF_SECRET` | Ya | Minimal 32 karakter; production menolak placeholder. |
+| `INITIAL_ADMIN_EMAIL` | Saat provisioning | Email Admin awal; password selalu diminta tersembunyi. |
+| `NODE_ENV`, `ACADEMY_TIMEZONE`, cookie/session/rate-limit/pool settings | Opsional | Nilai default tercantum pada `.env.example` dan `src/lib/env.ts`. |
+| `PGLITE_DATA_DIR`, `PGLITE_DEBUG` | Opsional | PgLite lokal/test; tidak digunakan jika `DATABASE_URL` valid. |
+| `TEST_DATABASE_URL` | Khusus integration test | Wajib DB terisolasi berakhiran `_test`; jangan set ke DB dev/prod. |
+
+`.env.example` adalah daftar nama dan nilai default yang konsisten dengan schema aplikasi. `NETLIFY` dan `BUN_TEST` merupakan flag runtime, bukan secrets konfigurasi Docker.
+
+## Privasi YouTube Unlisted
+
+Video siswa tetap hanya dapat direferensikan melalui API yang memeriksa hubungan/assignment pengguna. Namun YouTube Unlisted **bukan privasi kuat**: siapa pun yang memiliki URL dapat membagikan dan menontonnya sesuai perilaku YouTube. Jangan gunakan untuk konten yang mensyaratkan pembatasan berbasis akun. Highlights YouTube publik di landing page merupakan konten publik yang berbeda.
+
+## Batas Perubahan Riwayat Attendance
+
+Perubahan reguler oleh Parent/Coach terkunci mulai pukul **00:00 Asia/Jakarta pada tanggal occurrence + 7 hari kalender**. Contoh: occurrence 1 Oktober terkunci mulai 8 Oktober pukul 00:00 WIB. Koreksi historis hanya melalui jalur Admin, dengan alasan wajib dan audit.
+
+## Tes: PgLite dan PostgreSQL
+
+`bun run test` memakai test setup proyek dan terutama PgLite untuk feedback cepat. PgLite tidak membuktikan perilaku concurrency PostgreSQL. Tes integrasi di `tests/integration/pg` perlu PostgreSQL khusus test; baca guard `tests/integration/pg/_helpers.ts`, gunakan nama database berakhiran `_test`, dan jangan arahkan ke development atau production karena setup dapat menghapus tabel.
 
 ## Perbedaan dengan Deployment Netlify
 
@@ -173,22 +200,22 @@ docker compose exec db psql -U futsal -d futsal_academy
 | Database | PostgreSQL di container (volume persistent) | PostgreSQL managed (eksternal) |
 | Runtime | `next start` (Node.js, long-running) | Netlify serverless functions |
 | DB Pool | `DB_POOL_MAX=5` (multi-request per instance) | `DB_POOL_MAX=1` (satu request per instance) |
-| Build | `docker compose build` | `npm run build` di Netlify CI |
-| Migrasi | `docker compose exec app bun run db:migrate` | Manual sebelum deploy |
+| Build | `docker compose --env-file .env.docker build` | `npm run build` di Netlify CI |
+| Migrasi | `docker compose --env-file .env.docker exec app bun run db:migrate` | Manual sebelum deploy |
 
 ## Troubleshooting
 
 ### Aplikasi tidak bisa connect ke database
 
-1. Pastikan PostgreSQL sehat: `docker compose ps db`
-2. Cek log database: `docker compose logs db`
+1. Pastikan PostgreSQL sehat: `docker compose --env-file .env.docker ps db`
+2. Cek log database: `docker compose --env-file .env.docker logs db`
 3. Pastikan `DATABASE_URL` di `.env.docker` menggunakan hostname `db` (bukan `localhost`)
 4. Pastikan `sslmode=disable` (PostgreSQL di Docker tidak menggunakan SSL)
 
 ### Build gagal
 
 1. Pastikan `.dockerignore` tidak mengexclude file yang diperlukan
-2. Cek log build: `docker compose build --no-cache`
+2. Cek log build: `docker compose --env-file .env.docker build --no-cache`
 3. Pastikan `bun.lock` ada di root proyek
 
 ### Port 3000 sudah digunakan

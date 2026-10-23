@@ -5,10 +5,10 @@ import { handleApiRequest, parseBody, getAcademyIdFromQuery } from "@/lib/api/ha
 import { correctAttendance } from "@/lib/domain/attendance";
 
 const uuidSchema = z.string().uuid();
-const statusSchema = z.enum(["present", "absent", "excused", "late"]);
+const statusSchema = z.enum(["present", "absent", "excused"]);
 const correctSchema = z.object({
   status: statusSchema,
-  reason: z.string().min(1, "Reason is required"),
+  reason: z.string().trim().min(1, "Reason is required"),
   notes: z.string().max(2000).nullable().optional(),
 });
 
