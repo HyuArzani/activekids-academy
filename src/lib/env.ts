@@ -55,6 +55,11 @@ const schema = z.object({
   // when many serverless instances each create a pool.
   DB_POOL_MAX: z.coerce.number().int().positive().default(10),
 
+  // Force TLS for the PostgreSQL connection (Supabase, Neon, etc.).
+  // When unset, TLS is auto-detected from the URL sslmode or a known
+  // managed-provider hostname (see src/lib/db/pg-adapter.ts).
+  DB_SSL: z.enum(["true", "false"]).optional(),
+
   // Stage 9: configurable per-entitlement normal-move limit. Positive integer
   // (>= 1). The move count is derived from COUNT(entitlement_events WHERE
   // event_type='normal_moved') — no mutable counter. Server-side only; never

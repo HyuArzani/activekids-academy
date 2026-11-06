@@ -10,7 +10,7 @@
 # is additive — it does not restrict the project to Netlify.
 
 [build]
-  command = "npm run build"
+  command = "bun run build"
   publish = ".next"
 
 # Environment variables required at runtime (set via Netlify UI, NOT here):

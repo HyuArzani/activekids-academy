@@ -25,3 +25,4 @@ dev.log
 Thumbs.db
 .vscode/
 .idea/
+.env.docker

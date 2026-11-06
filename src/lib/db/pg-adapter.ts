@@ -56,6 +56,31 @@ import { Err, AppError } from "@/lib/errors";
  */
 pgTypes.setTypeParser(1082, (val: string) => val);
 
+/**
+ * Resolve TLS settings for the connection string.
+ * Precedence: DB_SSL env var ("true"/"false") > sslmode in URL >
+ * auto-detect known managed providers (Supabase, Neon, Render).
+ * Local PostgreSQL (localhost/127.0.0.1/docker) stays unencrypted.
+ */
+function resolveSsl(connectionString: string): boolean | { rejectUnauthorized: boolean } | undefined {
+  const explicit = process.env.DB_SSL?.toLowerCase();
+  if (explicit === "true") return { rejectUnauthorized: false };
+  if (explicit === "false") return undefined;
+  try {
+    const url = new URL(connectionString);
+    if (url.searchParams.get("sslmode") && url.searchParams.get("sslmode") !== "disable") {
+      return { rejectUnauthorized: false };
+    }
+    const host = url.hostname;
+    const managed = /(^|\.)supabase\.(co|com|net)$/.test(host) || /\.neon\.tech$/.test(host) || /\.render\.com$/.test(host);
+    if (managed) return { rejectUnauthorized: false };
+  } catch {
+    // Non-URL connection strings (e.g. plain DSN) — leave default behavior.
+  }
+  return undefined;
+}
+
+
 /** PostgreSQL-backed adapter implementing the `DbClient` interface. */
 export class PgAdapter implements DbClient {
   private readonly pool: Pool;
@@ -71,6 +96,11 @@ export class PgAdapter implements DbClient {
       max,
       idleTimeoutMillis: 30_000,
       connectionTimeoutMillis: 10_000,
+      // Managed providers (Supabase, Neon, etc.) require TLS. Enable when
+      // DB_SSL=true, when the URL carries ?sslmode=require, or when the
+      // host is a known managed provider. `rejectUnauthorized: false`
+      // accepts the provider's chain (Supabase uses its own CA).
+      ssl: resolveSsl(connectionString),
     });
   }
 

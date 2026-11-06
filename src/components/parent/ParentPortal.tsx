@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
-import { Users, RefreshCw, Loader2, AlertCircle, ArrowLeft, CalendarDays, Package, ClipboardCheck, FileText, Video } from "lucide-react";
+import { Users, RefreshCw, Loader2, AlertCircle, ArrowLeft, CalendarDays, Package, ClipboardCheck, ClipboardList, FileText, Video } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -13,6 +13,7 @@ import { ChildPackages } from "./ChildPackages";
 import { ChildAttendance } from "./ChildAttendance";
 import { ChildReports } from "./ChildReports";
 import { ChildVideos } from "./ChildVideos";
+import { ChildPlans } from "./ChildPlans";
 
 // === Types (match the API response shapes) ===============================
 
@@ -38,7 +39,7 @@ type LoadState =
   | { status: "success"; academyId: string; data: DashboardSummary }
   | { status: "error"; academyId: string; message: string };
 
-type ChildTab = "schedule" | "packages" | "attendance" | "reports" | "videos";
+type ChildTab = "schedule" | "packages" | "attendance" | "reports" | "videos" | "plans";
 
 // === Main component =======================================================
 
@@ -146,6 +147,7 @@ export function ParentPortal({ memberships, selectedAcademyId, onSelectAcademy, 
             <TabButton active={activeTab === "attendance"} onClick={() => setActiveTab("attendance")} icon={ClipboardCheck} label="Kehadiran" />
             <TabButton active={activeTab === "reports"} onClick={() => setActiveTab("reports")} icon={FileText} label="Laporan" />
             <TabButton active={activeTab === "videos"} onClick={() => setActiveTab("videos")} icon={Video} label="Video" />
+            <TabButton active={activeTab === "plans"} onClick={() => setActiveTab("plans")} icon={ClipboardList} label="Rencana" />
           </div>
 
           {/* Tab content */}
@@ -164,6 +166,9 @@ export function ParentPortal({ memberships, selectedAcademyId, onSelectAcademy, 
             )}
             {activeTab === "videos" && (
               <ChildVideos studentId={child.studentId} academyId={selectedAcademyId} onSessionExpired={onSessionExpired} />
+            )}
+            {activeTab === "plans" && (
+              <ChildPlans studentId={child.studentId} academyId={selectedAcademyId} onSessionExpired={onSessionExpired} />
             )}
           </div>
         </div>

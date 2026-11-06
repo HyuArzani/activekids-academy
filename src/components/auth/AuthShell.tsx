@@ -10,6 +10,7 @@ import { DashboardOverview } from "@/components/dashboard/DashboardOverview";
 import { StudentListNoAccess } from "@/components/students/StudentList";
 import { ParentPortal } from "@/components/parent/ParentPortal";
 import { AdminShell } from "@/components/admin/AdminShell";
+import { CoachPortal } from "@/components/coach/CoachPortal";
 import { PublicLandingPage } from "@/components/public/PublicLandingPage";
 import { PublicRegistrationForm } from "@/components/public/PublicRegistrationForm";
 import { PublicApplicationStatus } from "@/components/public/PublicApplicationStatus";
@@ -404,6 +405,13 @@ export function AuthShell() {
               />
             ) : principal.memberships.some((m) => m.role === "parent") ? (
               <ParentPortal
+                memberships={principal.memberships}
+                selectedAcademyId={selectedAcademyId}
+                onSelectAcademy={setSelectedAcademyId}
+                onSessionExpired={handleSessionExpired}
+              />
+            ) : principal.memberships.some((m) => m.role === "coach") ? (
+              <CoachPortal
                 memberships={principal.memberships}
                 selectedAcademyId={selectedAcademyId}
                 onSelectAcademy={setSelectedAcademyId}
