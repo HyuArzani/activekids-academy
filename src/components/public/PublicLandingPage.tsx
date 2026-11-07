@@ -350,10 +350,11 @@ export function PublicLandingPage({ academyId, onLoginClick, onRegisterClick, on
                 <Card key={video.id} className="overflow-hidden transition-all hover:border-primary/40 hover:shadow-sm">
                   <div className="aspect-video bg-black">
                     <iframe
-                      src={`https://www.youtube.com/embed/${video.videoId}`}
+                      src={`https://www.youtube-nocookie.com/embed/${video.videoId}`}
                       title={video.title}
                       allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
                       allowFullScreen
+                      loading="lazy"
                       className="h-full w-full"
                     />
                   </div>
