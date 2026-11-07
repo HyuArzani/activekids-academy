@@ -22,6 +22,20 @@ import {
   listMigrationFiles,
 } from "@/lib/db/migrate";
 
+function getErrorCode(err: Error): string | undefined {
+  if ("code" in err && typeof err.code === "string") return err.code;
+  return undefined;
+}
+
+function isDirectSupabaseUrl(value: string): boolean {
+  try {
+    const hostname = new URL(value).hostname;
+    return hostname.startsWith("db.") && hostname.endsWith(".supabase.co");
+  } catch {
+    return false;
+  }
+}
+
 async function main() {
   loadEnv();
   const db = getDb();
@@ -57,6 +71,19 @@ async function main() {
 main().catch((err) => {
   if (err instanceof AppError) {
     console.error(err.message, err.detail ?? "");
+    if (err.serverCause instanceof Error) {
+      const code = getErrorCode(err.serverCause);
+      console.error(`Database cause${code ? ` (${code})` : ""}: ${err.serverCause.message}`);
+      if (
+        code &&
+        ["ENOTFOUND", "EAI_AGAIN", "ENETUNREACH", "EHOSTUNREACH", "ETIMEDOUT"].includes(code) &&
+        isDirectSupabaseUrl(process.env.DATABASE_URL ?? "")
+      ) {
+        console.error(
+          "Hint: this is Supabase's direct database endpoint, which may require IPv6 or be unreachable from this network. In Supabase, choose Connect → Session pooler (port 5432) and set DATABASE_URL to that full URI.",
+        );
+      }
+    }
   } else {
     console.error("Migration failed:", err instanceof Error ? err.message : err);
   }

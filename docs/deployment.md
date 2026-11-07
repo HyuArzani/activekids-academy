@@ -83,11 +83,18 @@ bun install
 bun run db:migrate      # migrates the local PgLite database
 bun run db:seed         # optional demo data
 bun run provision-admin # first admin account
-bun run dev             # http://localhost:3000
+bun run dev             # http://localhost:3001/domain
 ```
 
 To develop against Supabase instead, set `DATABASE_URL` in `.env` before
 running `bun run db:migrate` and `bun run dev`.
+
+The local routes are `/domain` (public landing page), `/admin`, `/parent`,
+and `/coach`. Authenticated users are sent to the dashboard that matches their
+active role. Keep `INITIAL_ADMIN_EMAIL` set in the app environment: the
+matching admin account is the super admin and may use its initial password
+without the forced change; other provisioned accounts still must change
+their password on first sign-in.
 
 ## Roles & first login
 

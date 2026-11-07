@@ -11,8 +11,8 @@
  *   - Concurrent sessions explicitly allowed (multiple devices/browsers)
  *   - Password change revokes OTHER sessions (security precaution) but
  *     keeps the current session valid; performed transactionally
- *   - Forced password change enforcement (set must_change_password=true
- *     on provisioned accounts; cleared on successful change)
+ *   - Forced password change enforcement for provisioned accounts, except
+ *     the configured INITIAL_ADMIN_EMAIL super admin
  *
  * Security notes:
  *   - Login failure messages are generic ("Invalid email or password") to
@@ -42,7 +42,7 @@ import {
   recordLoginAttempt,
 } from "@/lib/auth/rateLimit";
 import { deriveCsrfToken } from "@/lib/auth/csrf";
-import type { Principal } from "@/lib/auth/principal";
+import { requiresPasswordChange, type Principal } from "@/lib/auth/principal";
 
 interface UserRow {
   id: string;
@@ -401,7 +401,7 @@ export function sanitizePrincipal(p: Principal): {
     userId: p.userId,
     email: p.email,
     fullName: p.fullName,
-    mustChangePassword: p.mustChangePassword,
+    mustChangePassword: requiresPasswordChange(p),
     memberships: p.memberships.map((m) => ({ academyId: m.academyId, role: m.role })),
   };
 }

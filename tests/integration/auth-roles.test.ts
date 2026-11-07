@@ -29,9 +29,11 @@ import {
   requireRoleAnywhere,
   requireAcademyMembership,
   requireNotMustChangePassword,
+  requiresPasswordChange,
   type Principal,
 } from "@/lib/auth/principal";
 import { AppError } from "@/lib/errors";
+import { sanitizePrincipal } from "@/lib/auth/service";
 import { sessionCookieName } from "@/lib/auth/session";
 import { csrfCookieName, CSRF_HEADER } from "@/lib/auth/csrf";
 
@@ -238,6 +240,36 @@ test("requireNotMustChangePassword throws MUST_CHANGE_PASSWORD when true", async
   } catch (err) {
     expect((err as AppError).code).toBe("MUST_CHANGE_PASSWORD");
   }
+});
+
+test("configured bootstrap admin skips forced password change", async () => {
+  const superAdmin = await createTestUser(db, {
+    email: "academy-admin@example.com",
+    password: "password123",
+    role: "admin",
+    academyId: ACADEMY_A_ID,
+    mustChangePassword: true,
+  });
+  const principal = await buildPrincipal(superAdmin);
+
+  expect(requiresPasswordChange(principal, " ACADEMY-ADMIN@EXAMPLE.COM ")).toBe(false);
+  expect(requiresPasswordChange(principal, "someone-else@example.com")).toBe(true);
+  expect(sanitizePrincipal(principal).mustChangePassword).toBe(
+    requiresPasswordChange(principal),
+  );
+});
+
+test("configured email does not bypass forced password change for non-admin roles", async () => {
+  const provisionedCoach = await createTestUser(db, {
+    email: "academy-coach@example.com",
+    password: "password123",
+    role: "coach",
+    academyId: ACADEMY_A_ID,
+    mustChangePassword: true,
+  });
+  const principal = await buildPrincipal(provisionedCoach);
+
+  expect(requiresPasswordChange(principal, "academy-coach@example.com")).toBe(true);
 });
 
 // --- Rate limiting (DB-backed) --------------------------------------------

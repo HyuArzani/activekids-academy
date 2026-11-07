@@ -15,9 +15,9 @@
  *     the principal has no membership in the given academy. Used by all
  *     academy-scoped operations to enforce academy isolation.
  *   - `requireNotMustChangePassword(principal)` — throws MUST_CHANGE_PASSWORD
- *     if the principal's account requires a password change. Enforced on
- *     EVERY protected page AND API handler (except the change-password
- *     endpoint itself).
+ *     if the account requires a password change. The admin configured by
+ *     INITIAL_ADMIN_EMAIL is exempt; all other protected routes and APIs
+ *     enforce the gate (except the change-password endpoint itself).
  *
  * Cross-academy access: a principal with role=admin in academy A cannot
  * access academy B's data even if they supply a valid UUID belonging to B.
@@ -237,10 +237,28 @@ export function requireAcademyMembership(
  * the principal must change their password before proceeding.
  */
 export function requireNotMustChangePassword(principal: Principal): Principal {
-  if (principal.mustChangePassword) {
+  if (requiresPasswordChange(principal)) {
     throw Err.mustChangePassword();
   }
   return principal;
+}
+
+/**
+ * The bootstrap admin configured with INITIAL_ADMIN_EMAIL is the academy's
+ * super admin and may use their provisioned credentials without the forced
+ * first-login password change. All other accounts keep the normal gate.
+ */
+export function requiresPasswordChange(
+  principal: Principal,
+  initialAdminEmail: string = env.INITIAL_ADMIN_EMAIL,
+): boolean {
+  if (!principal.mustChangePassword) return false;
+  const configuredEmail = initialAdminEmail.trim().toLowerCase();
+  const isConfiguredAdmin =
+    configuredEmail.length > 0 &&
+    principal.email.trim().toLowerCase() === configuredEmail &&
+    principal.memberships.some((membership) => membership.role === "admin");
+  return !isConfiguredAdmin;
 }
 
 /**

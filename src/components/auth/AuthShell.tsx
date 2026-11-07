@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import { useRouter } from "next/navigation";
 import { Database, LogIn, LogOut, KeyRound, AlertCircle, CheckCircle2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -11,7 +12,7 @@ import { StudentListNoAccess } from "@/components/students/StudentList";
 import { ParentPortal } from "@/components/parent/ParentPortal";
 import { AdminShell } from "@/components/admin/AdminShell";
 import { CoachPortal } from "@/components/coach/CoachPortal";
-import { PublicLandingPage } from "@/components/public/PublicLandingPage";
+import { AcademyLandingPage } from "@/components/public/AcademyLandingPage";
 import { PublicRegistrationForm } from "@/components/public/PublicRegistrationForm";
 import { PublicApplicationStatus } from "@/components/public/PublicApplicationStatus";
 
@@ -23,6 +24,8 @@ interface SanitizedPrincipal {
   memberships: { academyId: string; role: "admin" | "coach" | "parent" }[];
 }
 
+type PortalRole = "admin" | "parent" | "coach";
+type AuthShellMode = "public" | PortalRole;
 type View = "loading" | "landing" | "loginForm" | "registerForm" | "applicationStatus" | "changePassword" | "loggedIn";
 
 interface FormState {
@@ -41,8 +44,31 @@ const INITIAL_FORM: FormState = { loading: false, error: null, success: null };
  */
 const DEFAULT_LANDING_ACADEMY_ID = "00000000-0000-0000-0000-000000000001";
 
-export function AuthShell() {
-  const [view, setView] = useState<View>("loading");
+function dashboardPathFor(
+  principal: SanitizedPrincipal,
+  requestedMode: AuthShellMode,
+): string | null {
+  const roles = principal.memberships.map((membership) => membership.role);
+  const role =
+    requestedMode !== "public" && roles.includes(requestedMode)
+      ? requestedMode
+      : (["admin", "parent", "coach"] as const).find((candidate) =>
+          roles.includes(candidate),
+        );
+  return role ? `/${role}` : null;
+}
+
+export function AuthShell({
+  mode,
+  initialPublicView = "landing",
+}: {
+  mode: AuthShellMode;
+  initialPublicView?: "landing" | "registerForm";
+}) {
+  const router = useRouter();
+  const [view, setView] = useState<View>(
+    mode === "public" ? initialPublicView : "loading",
+  );
   const [principal, setPrincipal] = useState<SanitizedPrincipal | null>(null);
   const [loginForm, setLoginForm] = useState({ email: "", password: "" });
   const [loginState, setLoginState] = useState<FormState>(INITIAL_FORM);
@@ -56,6 +82,9 @@ export function AuthShell() {
   // await, so they're not synchronous-within-effect, but the compiler's
   // static analysis is conservative).
   useEffect(() => {
+    if (mode === "public") {
+      return;
+    }
     let cancelled = false;
     void (async () => {
       try {
@@ -63,32 +92,37 @@ export function AuthShell() {
         if (cancelled) return;
         if (res.status === 401 || !res.ok) {
           setPrincipal(null);
-          setView("landing");
+          setView("loginForm");
           return;
         }
         const data = (await res.json()) as { principal: SanitizedPrincipal };
         if (cancelled) return;
         setPrincipal(data.principal);
         // Initialize the shared academy selection to the first admin or parent membership.
-        const firstAcademy = data.principal.memberships.find(
-          (m) => m.role === "admin",
-        )?.academyId ?? data.principal.memberships.find(
-          (m) => m.role === "parent",
-        )?.academyId;
-        if (firstAcademy) {
-          setSelectedAcademyId(firstAcademy);
+        const selectedMembership =
+          data.principal.memberships.find((membership) => membership.role === mode) ??
+          data.principal.memberships.find((membership) => membership.role === "admin") ??
+          data.principal.memberships.find((membership) => membership.role === "parent") ??
+          data.principal.memberships.find((membership) => membership.role === "coach");
+        if (selectedMembership) {
+          setSelectedAcademyId(selectedMembership.academyId);
+        }
+        const dashboardPath = dashboardPathFor(data.principal, mode);
+        if (dashboardPath && dashboardPath !== `/${mode}`) {
+          router.replace(dashboardPath);
+          return;
         }
         setView(data.principal.mustChangePassword ? "changePassword" : "loggedIn");
       } catch {
         if (cancelled) return;
         setPrincipal(null);
-        setView("landing");
+        setView("loginForm");
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [mode, router]);
 
   async function handleLogin(e: React.FormEvent) {
     e.preventDefault();
@@ -113,6 +147,10 @@ export function AuthShell() {
         setView(data.principal.mustChangePassword ? "changePassword" : "loggedIn");
         setLoginForm({ email: "", password: "" });
         setLoginState({ loading: false, error: null, success: "Berhasil masuk" });
+        const dashboardPath = dashboardPathFor(data.principal, mode);
+        if (dashboardPath && dashboardPath !== `/${mode}`) {
+          router.replace(dashboardPath);
+        }
       }
     } catch {
       setLoginState({ loading: false, error: "Kesalahan jaringan", success: null });
@@ -136,6 +174,7 @@ export function AuthShell() {
     setPrincipal(null);
     setSelectedAcademyId("");
     setView("landing");
+    router.replace("/domain");
   }
 
   // Called when a parent-portal fetch returns 401 (session expired).
@@ -145,6 +184,7 @@ export function AuthShell() {
     setPrincipal(null);
     setSelectedAcademyId("");
     setView("landing");
+    router.replace("/domain");
   }
 
   async function handleChangePassword(e: React.FormEvent) {
@@ -186,6 +226,16 @@ export function AuthShell() {
     }
   }
 
+  if (mode === "public" && view === "landing") {
+    return (
+      <AcademyLandingPage
+        onLoginClick={() => setView("loginForm")}
+        onRegisterClick={() => setView("registerForm")}
+        onCheckStatusClick={() => setView("applicationStatus")}
+      />
+    );
+  }
+
   return (
     <div className="min-h-screen flex flex-col bg-background text-foreground">
       <header className="border-b bg-card">
@@ -199,9 +249,7 @@ export function AuthShell() {
                 Futsal Academy Management System
               </h1>
               <p className="text-sm text-muted-foreground">
-                {principal?.memberships.some((m) => m.role === "parent") && !principal?.memberships.some((m) => m.role === "admin")
-                  ? "Portal Wali"
-                  : "Dasbor Admin"}
+                {mode === "admin" ? "Dasbor Admin" : mode === "parent" ? "Portal Wali" : mode === "coach" ? "Portal Pelatih" : "Akun Akademi"}
               </p>
             </div>
           </div>
@@ -217,16 +265,7 @@ export function AuthShell() {
           </Card>
         )}
 
-        {view === "landing" && (
-          <PublicLandingPage
-            academyId={DEFAULT_LANDING_ACADEMY_ID}
-            onLoginClick={() => setView("loginForm")}
-            onRegisterClick={() => setView("registerForm")}
-            onCheckStatusClick={() => setView("applicationStatus")}
-          />
-        )}
-
-        {view === "registerForm" && (
+        {view === "registerForm" && mode === "public" && (
           <PublicRegistrationForm
             academyId={DEFAULT_LANDING_ACADEMY_ID}
             academyName="Futsal Academy"
@@ -283,15 +322,14 @@ export function AuthShell() {
                   {loginState.loading ? "Memproses…" : "Masuk"}
                 </Button>
                 <p className="text-xs text-muted-foreground">
-                  Tidak ada pendaftaran publik. Akun admin dibuat melalui
-                  skrip tepercaya <code>scripts/provision-admin.ts</code>.
+                  Masuk dengan akun yang terdaftar untuk portal ini.
                 </p>
                 <Button
                   type="button"
                   variant="ghost"
                   size="sm"
                   className="w-full"
-                  onClick={() => setView("landing")}
+                  onClick={() => router.push("/domain")}
                 >
                   ← Kembali ke halaman akademi
                 </Button>
@@ -397,20 +435,20 @@ export function AuthShell() {
             </Card>
 
             {/* Role-based views */}
-            {principal.memberships.some((m) => m.role === "admin") ? (
+            {mode === "admin" && principal.memberships.some((m) => m.role === "admin") ? (
               <AdminShell
                 memberships={principal.memberships}
                 selectedAcademyId={selectedAcademyId}
                 onSelectAcademy={setSelectedAcademyId}
               />
-            ) : principal.memberships.some((m) => m.role === "parent") ? (
+            ) : mode === "parent" && principal.memberships.some((m) => m.role === "parent") ? (
               <ParentPortal
                 memberships={principal.memberships}
                 selectedAcademyId={selectedAcademyId}
                 onSelectAcademy={setSelectedAcademyId}
                 onSessionExpired={handleSessionExpired}
               />
-            ) : principal.memberships.some((m) => m.role === "coach") ? (
+            ) : mode === "coach" && principal.memberships.some((m) => m.role === "coach") ? (
               <CoachPortal
                 memberships={principal.memberships}
                 selectedAcademyId={selectedAcademyId}

@@ -14,6 +14,9 @@ import {
   AlertCircle,
   Loader2,
   Rocket,
+  ArrowRight,
+  Play,
+  Sparkles,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -118,21 +121,114 @@ export function PublicLandingPage({ academyId, onLoginClick, onRegisterClick, on
     );
   }
 
-  if (error === "NOT_PUBLISHED") {
+  if (error) {
     return (
-      <div className="flex min-h-screen flex-col items-center justify-center bg-background px-4">
-        <Card className="max-w-md">
-          <CardContent className="p-8 text-center">
-            <Rocket className="mx-auto h-12 w-12 text-muted-foreground" aria-hidden />
-            <h2 className="mt-4 text-lg font-semibold">Halaman akademi segera hadir</h2>
-            <p className="mt-2 text-sm text-muted-foreground">
-              Akademi ini belum menerbitkan halaman publik. Silakan periksa kembali nanti atau hubungi akademi langsung.
-            </p>
-            <Button variant="outline" className="mt-6 gap-2" onClick={onLoginClick}>
-              <LogIn className="h-4 w-4" aria-hidden /> Masuk Admin
-            </Button>
-          </CardContent>
-        </Card>
+      <div className="min-h-screen bg-[#f7f8f3] text-[#12251c]">
+        <header className="border-b border-[#12251c]/10 bg-[#fbfcf8]">
+          <div className="mx-auto flex max-w-7xl items-center justify-between px-5 py-4 sm:px-8">
+            <a href="#top" className="flex items-center gap-3" aria-label="Futsal Academy home">
+              <span className="flex h-11 w-11 items-center justify-center rounded-xl bg-[#c6f36b] text-[#12251c]">
+                <Trophy className="h-5 w-5" aria-hidden />
+              </span>
+              <span>
+                <span className="block text-sm font-black uppercase tracking-[0.16em]">Futsal</span>
+                <span className="block text-[10px] font-semibold uppercase tracking-[0.24em] text-[#526459]">Academy</span>
+              </span>
+            </a>
+            <nav className="hidden items-center gap-8 text-sm font-medium text-[#526459] md:flex" aria-label="Main navigation">
+              <a href="#program" className="transition-colors hover:text-[#12251c]">Program</a>
+              <a href="#values" className="transition-colors hover:text-[#12251c]">Keunggulan</a>
+            </nav>
+            <div className="flex items-center gap-2">
+              <Button variant="ghost" size="sm" onClick={onLoginClick}>Masuk</Button>
+              <Button size="sm" className="bg-[#12251c] text-white hover:bg-[#244536]" onClick={onRegisterClick}>
+                Daftar latihan <ArrowRight className="ml-1 h-4 w-4" aria-hidden />
+              </Button>
+            </div>
+          </div>
+        </header>
+
+        <main id="top">
+          {error !== "NOT_PUBLISHED" && (
+            <div role="alert" className="border-b border-amber-900/10 bg-amber-50 px-5 py-3 text-center text-sm text-amber-950">
+              Konten akademi belum dapat dimuat ({error}). Menampilkan halaman sementara.
+            </div>
+          )}
+          <section className="relative overflow-hidden bg-[#10271e] text-white">
+            <div className="pointer-events-none absolute -right-32 -top-32 h-96 w-96 rounded-full bg-[#c6f36b]/10 blur-3xl" />
+            <div className="relative mx-auto grid max-w-7xl items-center gap-12 px-5 py-16 sm:px-8 sm:py-24 lg:grid-cols-[0.9fr_1.1fr] lg:gap-16 lg:py-28">
+              <div>
+                <p className="inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/5 px-4 py-2 text-xs font-semibold uppercase tracking-[0.16em] text-[#c6f36b]">
+                  <Sparkles className="h-4 w-4" aria-hidden /> Akademi futsal untuk generasi hebat
+                </p>
+                <h1 className="mt-7 max-w-2xl text-4xl font-black leading-[1.05] tracking-tight sm:text-6xl">
+                  Bermain dengan hati. <span className="text-[#c6f36b]">Berkembang</span> setiap hari.
+                </h1>
+                <p className="mt-6 max-w-xl text-base leading-7 text-white/70 sm:text-lg">
+                  Tempat anak belajar teknik, kerja sama, dan percaya diri lewat latihan futsal yang seru dan terarah.
+                </p>
+                <div className="mt-9 flex flex-wrap gap-3">
+                  <Button size="lg" className="bg-[#c6f36b] font-bold text-[#12251c] hover:bg-[#d5ff86]" onClick={onRegisterClick}>
+                    Mulai perjalanan <ArrowRight className="ml-2 h-4 w-4" aria-hidden />
+                  </Button>
+                  <Button size="lg" variant="outline" className="border-white/25 bg-transparent text-white hover:bg-white/10 hover:text-white" onClick={onCheckStatusClick}>
+                    Cek pendaftaran
+                  </Button>
+                </div>
+                <p className="mt-8 text-sm text-white/50">Latihan yang membangun kemampuan — dan karakter.</p>
+              </div>
+
+              <div className="relative">
+                <div className="absolute -inset-3 rotate-2 rounded-[2rem] bg-[#c6f36b]/20" />
+                <div className="relative flex aspect-video items-center justify-center overflow-hidden rounded-3xl border border-white/15 bg-[radial-gradient(ellipse_at_70%_20%,rgba(198,243,107,0.22),transparent_35%),linear-gradient(135deg,#294b37,#0b1711)] shadow-2xl">
+                  <div className="absolute inset-0 opacity-20" style={{ backgroundImage: "linear-gradient(rgba(255,255,255,.2) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.2) 1px, transparent 1px)", backgroundSize: "48px 48px" }} />
+                  <div className="relative flex flex-col items-center px-6 text-center">
+                    <span className="flex h-16 w-16 items-center justify-center rounded-full bg-[#c6f36b] text-[#12251c] shadow-lg shadow-black/20">
+                      <Play className="ml-1 h-7 w-7 fill-current" aria-hidden />
+                    </span>
+                    <p className="mt-5 text-lg font-bold">Cerita latihan kami</p>
+                    <p className="mt-2 text-sm text-white/65">Video YouTube akademi segera hadir</p>
+                  </div>
+                  <span className="absolute bottom-5 left-5 rounded-full border border-white/20 bg-black/20 px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-white/70">Video sorotan</span>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section id="values" className="mx-auto grid max-w-7xl gap-4 px-5 py-12 sm:grid-cols-3 sm:px-8 sm:py-16">
+            {[
+              { title: "Teknik dasar", body: "Latihan terarah untuk membangun sentuhan dan kontrol bola." },
+              { title: "Kerja sama tim", body: "Belajar berkomunikasi, saling mendukung, dan bermain bersama." },
+              { title: "Percaya diri", body: "Ruang positif untuk mencoba, bertumbuh, dan berani tampil." },
+            ].map((item, index) => (
+              <article key={item.title} className="rounded-2xl border border-[#12251c]/10 bg-white p-6 shadow-sm">
+                <p className="text-xs font-black uppercase tracking-[0.18em] text-[#718078]">0{index + 1}</p>
+                <h2 className="mt-4 text-xl font-bold">{item.title}</h2>
+                <p className="mt-2 text-sm leading-6 text-[#617066]">{item.body}</p>
+              </article>
+            ))}
+          </section>
+
+          <section id="program" className="bg-[#eaf0e4]">
+            <div className="mx-auto flex max-w-7xl flex-col gap-6 px-5 py-12 sm:px-8 sm:py-16 md:flex-row md:items-center md:justify-between">
+              <div>
+                <p className="text-xs font-bold uppercase tracking-[0.2em] text-[#65786a]">Mulai dari sini</p>
+                <h2 className="mt-2 text-2xl font-black sm:text-3xl">Siap mencoba latihan pertama?</h2>
+                <p className="mt-2 max-w-xl text-sm leading-6 text-[#617066]">Hubungi kami untuk informasi jadwal dan program yang sesuai.</p>
+              </div>
+              <Button size="lg" className="shrink-0 bg-[#12251c] text-white hover:bg-[#244536]" onClick={onRegisterClick}>
+                Daftar sekarang <ArrowRight className="ml-2 h-4 w-4" aria-hidden />
+              </Button>
+            </div>
+          </section>
+        </main>
+
+        <footer className="border-t border-[#12251c]/10 bg-[#fbfcf8]">
+          <div className="mx-auto flex max-w-7xl flex-col gap-3 px-5 py-6 text-xs text-[#718078] sm:flex-row sm:items-center sm:justify-between sm:px-8">
+            <p>© {new Date().getFullYear()} Futsal Academy</p>
+            <Button variant="ghost" size="sm" onClick={onLoginClick}>Masuk pengelola</Button>
+          </div>
+        </footer>
       </div>
     );
   }
@@ -160,42 +256,68 @@ export function PublicLandingPage({ academyId, onLoginClick, onRegisterClick, on
   const ctaText = c.hero?.ctaText ?? c.registrationCta?.text ?? "Daftar Sekarang";
 
   return (
-    <div className="min-h-screen bg-background">
+    <div className="min-h-screen bg-[#f7f8f3] text-[#12251c]">
       {/* ===== Top Bar ===== */}
-      <div className="sticky top-0 z-50 border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
-        <div className="mx-auto flex max-w-5xl items-center justify-between px-4 py-3 sm:px-6">
-          <p className="text-sm font-semibold">{page.academyName}</p>
+      <div className="sticky top-0 z-50 border-b border-[#12251c]/10 bg-[#fbfcf8]/95 backdrop-blur">
+        <div className="mx-auto flex max-w-7xl items-center justify-between px-5 py-4 sm:px-8">
+          <a href="#top" className="flex items-center gap-3">
+            <span className="flex h-11 w-11 items-center justify-center rounded-xl bg-[#c6f36b]">
+              <Trophy className="h-5 w-5" aria-hidden />
+            </span>
+            <span className="text-sm font-black uppercase tracking-[0.12em]">{page.academyName}</span>
+          </a>
+          <nav className="hidden items-center gap-7 text-sm font-medium text-[#526459] md:flex" aria-label="Main navigation">
+            <a href="#about" className="hover:text-[#12251c]">Akademi</a>
+            <a href="#programs" className="hover:text-[#12251c]">Program</a>
+            <a href="#schedule" className="hover:text-[#12251c]">Jadwal</a>
+          </nav>
           <div className="flex items-center gap-2">
-            <Button variant="ghost" size="sm" onClick={onCheckStatusClick} className="text-xs">
+            <Button variant="ghost" size="sm" onClick={onCheckStatusClick} className="hidden text-xs sm:inline-flex">
               Cek Status
             </Button>
-            <Button variant="outline" size="sm" onClick={onLoginClick} className="gap-2">
-              <LogIn className="h-4 w-4" aria-hidden /> Masuk
-            </Button>
+            <Button size="sm" className="bg-[#12251c] text-white hover:bg-[#244536]" onClick={onLoginClick}>Masuk</Button>
+            <Button size="sm" className="bg-[#c6f36b] text-[#12251c] hover:bg-[#d5ff86]" onClick={onRegisterClick}>Daftar</Button>
           </div>
         </div>
       </div>
 
       {/* ===== Hero Section ===== */}
-      <section className="relative overflow-hidden bg-gradient-to-br from-primary/10 via-primary/5 to-background">
-        <div className="mx-auto max-w-5xl px-4 py-16 sm:px-6 sm:py-24">
-          <div className="text-center">
-            <h1 className="text-3xl font-bold tracking-tight sm:text-5xl lg:text-6xl">
+      <section id="top" className="relative overflow-hidden bg-[#10271e] text-white">
+        <div className="pointer-events-none absolute -right-32 -top-32 h-96 w-96 rounded-full bg-[#c6f36b]/10 blur-3xl" />
+        <div className="relative mx-auto grid max-w-7xl items-center gap-12 px-5 py-16 sm:px-8 sm:py-24 lg:grid-cols-[0.9fr_1.1fr] lg:gap-16 lg:py-28">
+          <div>
+            <p className="inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/5 px-4 py-2 text-xs font-semibold uppercase tracking-[0.16em] text-[#c6f36b]">
+              <Sparkles className="h-4 w-4" aria-hidden /> Akademi futsal untuk generasi hebat
+            </p>
+            <h1 className="mt-7 max-w-2xl text-4xl font-black leading-[1.05] tracking-tight sm:text-6xl">
               {heroTitle}
             </h1>
             {heroSubtitle && (
-              <p className="mt-4 text-lg text-muted-foreground sm:text-xl">
-                {heroSubtitle}
-              </p>
+              <p className="mt-6 max-w-xl text-base leading-7 text-white/70 sm:text-lg">{heroSubtitle}</p>
             )}
-            <div className="mt-8 flex justify-center">
-              <button
-                type="button"
-                onClick={onRegisterClick}
-                className="inline-flex items-center gap-2 rounded-lg bg-primary px-6 py-3 text-sm font-medium text-primary-foreground shadow-sm transition-colors hover:bg-primary/90"
-              >
-                <Rocket className="h-4 w-4" aria-hidden /> {ctaText}
-              </button>
+            <div className="mt-9 flex flex-wrap gap-3">
+              <Button size="lg" className="bg-[#c6f36b] font-bold text-[#12251c] hover:bg-[#d5ff86]" onClick={onRegisterClick}>
+                {ctaText} <ArrowRight className="ml-2 h-4 w-4" aria-hidden />
+              </Button>
+              <Button size="lg" variant="outline" className="border-white/25 bg-transparent text-white hover:bg-white/10 hover:text-white" onClick={onCheckStatusClick}>
+                Cek pendaftaran
+              </Button>
+            </div>
+            <p className="mt-8 text-sm text-white/50">Latihan yang membangun kemampuan — dan karakter.</p>
+          </div>
+
+          <div className="relative">
+            <div className="absolute -inset-3 rotate-2 rounded-[2rem] bg-[#c6f36b]/20" />
+            <div className="relative flex aspect-video items-center justify-center overflow-hidden rounded-3xl border border-white/15 bg-[radial-gradient(ellipse_at_70%_20%,rgba(198,243,107,0.22),transparent_35%),linear-gradient(135deg,#294b37,#0b1711)] shadow-2xl">
+              <div className="absolute inset-0 opacity-20" style={{ backgroundImage: "linear-gradient(rgba(255,255,255,.2) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.2) 1px, transparent 1px)", backgroundSize: "48px 48px" }} />
+              <div className="relative flex flex-col items-center px-6 text-center">
+                <span className="flex h-16 w-16 items-center justify-center rounded-full bg-[#c6f36b] text-[#12251c] shadow-lg shadow-black/20">
+                  <Play className="ml-1 h-7 w-7 fill-current" aria-hidden />
+                </span>
+                <p className="mt-5 text-lg font-bold">Cerita latihan kami</p>
+                <p className="mt-2 text-sm text-white/65">Video YouTube akademi segera hadir</p>
+              </div>
+              <span className="absolute bottom-5 left-5 rounded-full border border-white/20 bg-black/20 px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-white/70">Video sorotan</span>
             </div>
           </div>
         </div>
@@ -203,10 +325,11 @@ export function PublicLandingPage({ academyId, onLoginClick, onRegisterClick, on
 
       {/* ===== About Section ===== */}
       {c.about?.title && c.about?.body && (
-        <section className="border-t">
-          <div className="mx-auto max-w-5xl px-4 py-12 sm:px-6 sm:py-16">
-            <h2 className="text-2xl font-bold sm:text-3xl">{c.about.title}</h2>
-            <p className="mt-4 text-base leading-relaxed text-muted-foreground sm:text-lg">
+        <section id="about" className="border-t border-[#12251c]/10 bg-[#f7f8f3]">
+          <div className="mx-auto max-w-7xl px-5 py-14 sm:px-8 sm:py-20">
+            <p className="text-xs font-bold uppercase tracking-[0.2em] text-[#718078]">Tentang kami</p>
+            <h2 className="mt-3 max-w-3xl text-3xl font-black sm:text-4xl">{c.about.title}</h2>
+            <p className="mt-5 max-w-3xl text-base leading-7 text-[#617066] sm:text-lg">
               {c.about.body}
             </p>
           </div>
@@ -215,19 +338,20 @@ export function PublicLandingPage({ academyId, onLoginClick, onRegisterClick, on
 
       {/* ===== Programs Section ===== */}
       {c.programs && c.programs.length > 0 && (
-        <section className="border-t bg-muted/30">
-          <div className="mx-auto max-w-5xl px-4 py-12 sm:px-6 sm:py-16">
+        <section id="programs" className="border-t border-[#12251c]/10 bg-[#eaf0e4]">
+          <div className="mx-auto max-w-7xl px-5 py-14 sm:px-8 sm:py-20">
             <div className="text-center">
-              <Trophy className="mx-auto h-8 w-8 text-primary" aria-hidden />
-              <h2 className="mt-2 text-2xl font-bold sm:text-3xl">Program</h2>
+              <Trophy className="mx-auto h-8 w-8 text-[#4c702e]" aria-hidden />
+              <h2 className="mt-3 text-3xl font-black sm:text-4xl">Program latihan</h2>
             </div>
             <div className="mt-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
               {c.programs.map((p, i) => (
-                <Card key={i} className="transition-all hover:border-primary/40 hover:shadow-sm">
-                  <CardContent className="p-5">
-                    <h3 className="text-base font-semibold">{p.name}</h3>
+                <Card key={i} className="border-[#12251c]/10 bg-[#fbfcf8] transition-all hover:-translate-y-1 hover:shadow-md">
+                  <CardContent className="p-6">
+                    <p className="text-xs font-black uppercase tracking-[0.18em] text-[#718078]">Program 0{i + 1}</p>
+                    <h3 className="mt-3 text-lg font-bold">{p.name}</h3>
                     {p.description && (
-                      <p className="mt-2 text-sm text-muted-foreground">{p.description}</p>
+                      <p className="mt-2 text-sm leading-6 text-[#617066]">{p.description}</p>
                     )}
                   </CardContent>
                 </Card>
@@ -239,15 +363,15 @@ export function PublicLandingPage({ academyId, onLoginClick, onRegisterClick, on
 
       {/* ===== Schedules Section ===== */}
       {c.schedules && c.schedules.length > 0 && (
-        <section className="border-t">
-          <div className="mx-auto max-w-5xl px-4 py-12 sm:px-6 sm:py-16">
+        <section id="schedule" className="border-t border-[#12251c]/10 bg-[#f7f8f3]">
+          <div className="mx-auto max-w-7xl px-5 py-14 sm:px-8 sm:py-20">
             <div className="text-center">
-              <Calendar className="mx-auto h-8 w-8 text-primary" aria-hidden />
-              <h2 className="mt-2 text-2xl font-bold sm:text-3xl">Jadwal Latihan</h2>
+              <Calendar className="mx-auto h-8 w-8 text-[#4c702e]" aria-hidden />
+              <h2 className="mt-3 text-3xl font-black sm:text-4xl">Jadwal latihan</h2>
             </div>
-            <div className="mt-8 overflow-hidden rounded-lg border">
+            <div className="mt-8 overflow-hidden rounded-2xl border border-[#12251c]/10 bg-[#fbfcf8]">
               <table className="w-full text-sm">
-                <thead className="bg-muted/50">
+                <thead className="bg-[#eaf0e4]">
                   <tr>
                     <th className="px-4 py-3 text-left font-medium">Hari</th>
                     <th className="px-4 py-3 text-left font-medium">Jam</th>
@@ -256,10 +380,10 @@ export function PublicLandingPage({ academyId, onLoginClick, onRegisterClick, on
                 </thead>
                 <tbody className="divide-y">
                   {c.schedules.map((s, i) => (
-                    <tr key={i} className="hover:bg-muted/30">
-                      <td className="px-4 py-3 font-medium">{s.day}</td>
+                    <tr key={i} className="border-t border-[#12251c]/10 hover:bg-[#eaf0e4]/50">
+                      <td className="px-4 py-3 font-semibold">{s.day}</td>
                       <td className="px-4 py-3">{s.time}</td>
-                      <td className="px-4 py-3 text-muted-foreground">{s.className ?? "—"}</td>
+                      <td className="px-4 py-3 text-[#617066]">{s.className ?? "—"}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -271,22 +395,22 @@ export function PublicLandingPage({ academyId, onLoginClick, onRegisterClick, on
 
       {/* ===== Coaches Section ===== */}
       {c.coaches && c.coaches.length > 0 && (
-        <section className="border-t bg-muted/30">
-          <div className="mx-auto max-w-5xl px-4 py-12 sm:px-6 sm:py-16">
+        <section className="border-t border-[#12251c]/10 bg-[#eaf0e4]">
+          <div className="mx-auto max-w-7xl px-5 py-14 sm:px-8 sm:py-20">
             <div className="text-center">
-              <Users className="mx-auto h-8 w-8 text-primary" aria-hidden />
-              <h2 className="mt-2 text-2xl font-bold sm:text-3xl">Pelatih Kami</h2>
+              <Users className="mx-auto h-8 w-8 text-[#4c702e]" aria-hidden />
+              <h2 className="mt-3 text-3xl font-black sm:text-4xl">Kenalan dengan pelatih</h2>
             </div>
             <div className="mt-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
               {c.coaches.map((coach, i) => (
-                <Card key={i} className="text-center transition-all hover:border-primary/40 hover:shadow-sm">
-                  <CardContent className="p-5">
-                    <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-primary/10 text-xl font-bold text-primary">
+                <Card key={i} className="border-[#12251c]/10 bg-[#fbfcf8] text-center transition-all hover:-translate-y-1 hover:shadow-md">
+                  <CardContent className="p-6">
+                    <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-2xl bg-[#c6f36b] text-xl font-black text-[#12251c]">
                       {coach.name.charAt(0).toUpperCase()}
                     </div>
                     <h3 className="mt-3 text-base font-semibold">{coach.name}</h3>
                     {coach.role && (
-                      <Badge variant="secondary" className="mt-1">{coach.role}</Badge>
+                      <Badge variant="secondary" className="mt-2 bg-[#eaf0e4] text-[#526459]">{coach.role}</Badge>
                     )}
                     {coach.bio && (
                       <p className="mt-2 text-sm text-muted-foreground">{coach.bio}</p>
@@ -301,8 +425,8 @@ export function PublicLandingPage({ academyId, onLoginClick, onRegisterClick, on
 
       {/* ===== Gallery Section ===== */}
       {page.gallery.length > 0 && (
-        <section className="border-t">
-          <div className="mx-auto max-w-5xl px-4 py-12 sm:px-6 sm:py-16">
+        <section className="border-t border-[#12251c]/10 bg-[#f7f8f3]">
+          <div className="mx-auto max-w-7xl px-5 py-14 sm:px-8 sm:py-20">
             <div className="text-center">
               <h2 className="text-2xl font-bold sm:text-3xl">Galeri</h2>
             </div>
@@ -340,14 +464,14 @@ export function PublicLandingPage({ academyId, onLoginClick, onRegisterClick, on
 
       {/* ===== Videos Section ===== */}
       {page.videos.length > 0 && (
-        <section className="border-t bg-muted/30">
-          <div className="mx-auto max-w-5xl px-4 py-12 sm:px-6 sm:py-16">
+        <section className="border-t border-[#12251c]/10 bg-[#eaf0e4]">
+          <div className="mx-auto max-w-7xl px-5 py-14 sm:px-8 sm:py-20">
             <div className="text-center">
               <h2 className="text-2xl font-bold sm:text-3xl">Video</h2>
             </div>
             <div className="mt-8 grid gap-4 sm:grid-cols-2">
               {page.videos.map((video) => (
-                <Card key={video.id} className="overflow-hidden transition-all hover:border-primary/40 hover:shadow-sm">
+                <Card key={video.id} className="overflow-hidden border-[#12251c]/10 bg-[#fbfcf8]">
                   <div className="aspect-video bg-black">
                     <iframe
                       src={`https://www.youtube-nocookie.com/embed/${video.videoId}`}
@@ -370,8 +494,8 @@ export function PublicLandingPage({ academyId, onLoginClick, onRegisterClick, on
 
       {/* ===== Location + Contact Section ===== */}
       {(c.location?.address || c.contact?.phone || c.contact?.email || c.contact?.whatsapp) && (
-        <section className="border-t">
-          <div className="mx-auto max-w-5xl px-4 py-12 sm:px-6 sm:py-16">
+        <section className="border-t border-[#12251c]/10 bg-[#f7f8f3]">
+          <div className="mx-auto max-w-7xl px-5 py-14 sm:px-8 sm:py-20">
             <div className="grid gap-8 md:grid-cols-2">
               {/* Location */}
               {c.location?.address && (
@@ -430,18 +554,18 @@ export function PublicLandingPage({ academyId, onLoginClick, onRegisterClick, on
       )}
 
       {/* ===== Registration CTA Section ===== */}
-      <section className="border-t bg-primary text-primary-foreground">
-        <div className="mx-auto max-w-5xl px-4 py-12 text-center sm:px-6 sm:py-16">
+      <section className="border-t border-white/10 bg-[#10271e] text-white">
+        <div className="mx-auto max-w-7xl px-5 py-14 text-center sm:px-8 sm:py-20">
           <h2 className="text-2xl font-bold sm:text-3xl">
             {c.registrationCta?.text ?? "Siap Bergabung?"}
           </h2>
-          <p className="mt-3 text-primary-foreground/80">
+          <p className="mt-3 text-white/70">
             Daftarkan anak Anda hari ini dan mulai perjalanan futsalnya.
           </p>
           <button
             type="button"
             onClick={onRegisterClick}
-            className="mt-6 inline-flex items-center gap-2 rounded-lg bg-background px-6 py-3 text-sm font-medium text-foreground shadow-sm transition-colors hover:bg-background/90"
+            className="mt-6 inline-flex items-center gap-2 rounded-lg bg-[#c6f36b] px-6 py-3 text-sm font-bold text-[#12251c] shadow-sm transition-colors hover:bg-[#d5ff86]"
           >
             <Rocket className="h-4 w-4" aria-hidden /> {ctaText}
           </button>
@@ -449,8 +573,8 @@ export function PublicLandingPage({ academyId, onLoginClick, onRegisterClick, on
       </section>
 
       {/* ===== Footer ===== */}
-      <footer className="border-t bg-card">
-        <div className="mx-auto max-w-5xl px-4 py-6 text-center text-xs text-muted-foreground sm:px-6">
+      <footer className="border-t border-[#12251c]/10 bg-[#fbfcf8]">
+        <div className="mx-auto max-w-7xl px-5 py-6 text-center text-xs text-[#718078] sm:px-8">
           <p>© {new Date().getFullYear()} {page.academyName}. Hak cipta dilindungi.</p>
           <p className="mt-1">Diterbitkan {new Date(page.publishedAt).toLocaleDateString("id-ID")} · Versi {page.versionNumber}</p>
         </div>

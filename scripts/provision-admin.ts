@@ -12,8 +12,9 @@
  *   2. Prompts for the initial password on an interactive TTY (hidden input).
  *   3. Requires the seeded academy (slug="default") to exist.
  *   4. If the user doesn't exist, creates them with
- *      `must_change_password=true` (so the admin is forced to set a
- *      fresh password on first login).
+ *      `must_change_password=true`. The configured INITIAL_ADMIN_EMAIL is
+ *      treated as the super admin and may use this password as-is; other
+ *      provisioned admins are prompted to change it at first login.
  *   5. If the user already exists, prints a warning and does NOT
  *      overwrite their password (idempotent for safety).
  *   6. Creates an `academy_memberships` row with role='admin' if one
@@ -22,9 +23,8 @@
  * Security:
  *   - Never logs the password (plaintext or hash).
  *   - The password is hashed with Argon2id before storage.
- *   - `must_change_password=true` forces a fresh password on first
- *     login, so even if the provisioning password leaks, the admin must
- *     change it before using the account.
+ *   - Other provisioned accounts are still forced to change their password
+ *     on first login; the configured INITIAL_ADMIN_EMAIL is the exception.
  *   - If the user already exists, the script does NOT update their
  *     password (prevents an attacker who runs the script from
  *     hijacking an existing admin account).
@@ -114,7 +114,7 @@ async function main() {
     });
     console.info(result.createdUser ? "Created initial Admin user." : "User already exists; password was not changed.");
     console.info(result.createdMembership ? "Created Admin academy membership." : "Admin membership already exists.");
-    console.info("PROVISION_OK — log in and change the initial password.");
+    console.info("PROVISION_OK — log in with the configured initial admin account.");
   } finally {
     await db.close();
   }
