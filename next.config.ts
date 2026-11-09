@@ -1,6 +1,7 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  serverExternalPackages: ["@node-rs/argon2"],
   // output: "standalone" removed for Netlify compatibility.
   // Netlify's Next.js Runtime handles routing via serverless functions;
   // standalone output (a single server.js for self-hosting) conflicts with

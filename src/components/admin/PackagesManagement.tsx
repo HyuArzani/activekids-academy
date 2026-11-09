@@ -26,7 +26,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Switch } from "@/components/ui/switch";
-import { CSRF_HEADER } from "@/lib/auth/csrf";
+import { CSRF_HEADER } from "@/lib/auth/csrf-constants";
 import { toast } from "@/hooks/use-toast";
 
 // ============================================================================

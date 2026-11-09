@@ -18,9 +18,7 @@ import {
 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { formatRupiah } from "@/lib/format/rupiah";
 
 // === Types (match the API response) =====================================
@@ -121,13 +119,11 @@ function SectionCard({
 interface DashboardOverviewProps {
   memberships: { academyId: string; role: string }[];
   selectedAcademyId: string;
-  onSelectAcademy: (academyId: string) => void;
 }
 
 export function DashboardOverview({
   memberships,
   selectedAcademyId,
-  onSelectAcademy,
 }: DashboardOverviewProps) {
   const adminMemberships = memberships.filter((m) => m.role === "admin");
   const [state, setState] = useState<LoadState>({
@@ -216,36 +212,8 @@ export function DashboardOverview({
 
   return (
     <div className="space-y-6">
-      {/* Academy selector + reporting period */}
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-        <div className="space-y-1.5">
-          {adminMemberships.length > 1 ? (
-            <>
-              <Label htmlFor="academy-select" className="text-xs text-muted-foreground">
-                Akademi
-              </Label>
-              <Select value={selectedAcademyId} onValueChange={onSelectAcademy}>
-                <SelectTrigger id="academy-select" className="w-full sm:w-72">
-                  <SelectValue placeholder="Pilih akademi" />
-                </SelectTrigger>
-                <SelectContent>
-                  {adminMemberships.map((m) => (
-                    <SelectItem key={m.academyId} value={m.academyId}>
-                      Akademi {m.academyId.slice(0, 8)}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </>
-          ) : (
-            <p className="text-sm text-muted-foreground">
-              Akademi{" "}
-              <code className="rounded bg-muted px-1 py-0.5 text-xs">
-                {selectedAcademyId.slice(0, 8)}
-              </code>
-            </p>
-          )}
-        </div>
+      {/* Reporting period */}
+      <div className="flex justify-end">
         {showSuccess && state.status === "success" && state.data && (
           <div className="text-right">
             <p className="text-xs text-muted-foreground">Hari ini</p>

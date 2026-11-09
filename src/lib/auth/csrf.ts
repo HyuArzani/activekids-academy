@@ -36,6 +36,7 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { env } from "@/lib/env";
 import { Err } from "@/lib/errors";
+export { CSRF_HEADER } from "@/lib/auth/csrf-constants";
 
 /** Derive the CSRF token from a session token using HMAC-SHA256. */
 export function deriveCsrfToken(sessionToken: string): string {
@@ -63,9 +64,6 @@ export function csrfCookieAttributes(maxAgeSeconds: number) {
 export function csrfCookieName(): string {
   return env.CSRF_COOKIE_NAME;
 }
-
-/** Header name for the submitted CSRF token. */
-export const CSRF_HEADER = "x-csrf-token";
 
 /**
  * Verify a CSRF request. The session token is the raw value from the

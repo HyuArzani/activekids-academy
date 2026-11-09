@@ -52,10 +52,12 @@ const highlightIcons = {
 } as const;
 
 export function AcademyLandingPage({
+  academyId = "00000000-0000-0000-0000-000000000001",
   onLoginClick,
   onRegisterClick,
   onCheckStatusClick,
 }: {
+  academyId?: string;
   onLoginClick: () => void;
   onRegisterClick: () => void;
   onCheckStatusClick: () => void;
@@ -68,7 +70,7 @@ export function AcademyLandingPage({
     void (async () => {
       try {
         const response = await fetch(
-          "/api/public/landing?academyId=00000000-0000-0000-0000-000000000001",
+          `/api/public/landing?academyId=${encodeURIComponent(academyId)}`,
         );
         if (cancelled) return;
         if (response.status === 404) {
@@ -87,9 +89,23 @@ export function AcademyLandingPage({
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [academyId]);
 
   const content = page?.content;
+  const cmsPrograms = content?.programs?.filter((program) => program.name.trim()) ?? [];
+  const programs = cmsPrograms.length
+    ? cmsPrograms.map((program, index) => {
+        const fallback =
+          publicSiteConfig.landing.programs.find(
+            (item) => item.name.trim().toLowerCase() === program.name.trim().toLowerCase(),
+          ) ?? publicSiteConfig.landing.programs[index % publicSiteConfig.landing.programs.length]!;
+        return {
+          ...fallback,
+          name: program.name,
+          description: program.description ?? fallback.description,
+        };
+      })
+    : publicSiteConfig.landing.programs;
   const academyName = page?.academyName ?? publicSiteConfig.academyName;
   const featuredVideo = page?.videos.find((video) => video.isFeatured) ?? page?.videos[0];
   const heroVideoId = publicSiteConfig.landing.hero.videoId || featuredVideo?.videoId || "";
@@ -189,10 +205,7 @@ export function AcademyLandingPage({
               </p>
             </div>
             <div className="mt-8 grid gap-5 md:grid-cols-3">
-              {publicSiteConfig.landing.programs.map((program, index) => {
-                const cmsProgram = content?.programs?.find(
-                  (item) => item.name.trim().toLowerCase() === program.name.toLowerCase(),
-                );
+              {programs.map((program, index) => {
                 return (
                   <article key={program.name} className="group overflow-hidden rounded-xl border border-white/15 bg-[#103a29] transition-transform duration-200 hover:-translate-y-1">
                     <PhotoPlaceholder
@@ -206,7 +219,7 @@ export function AcademyLandingPage({
                       <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-[#c8e600]">Program 0{index + 1}</p>
                       <h3 className="mt-2 text-xl font-black italic">{program.name}</h3>
                       <p className="mt-2 min-h-12 text-sm leading-6 text-[#a7b2aa]">
-                        {cmsProgram?.description ?? program.description}
+                        {program.description}
                       </p>
                       <div className="mt-5 flex items-center justify-between border-t border-white/10 pt-4">
                         <span className="rounded-full bg-white/10 px-3 py-1 text-[11px] text-white/75">{program.ageGroup}</span>

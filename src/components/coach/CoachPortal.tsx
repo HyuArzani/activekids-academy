@@ -27,6 +27,7 @@ import {
   Check,
   X,
   MinusCircle,
+  LayoutDashboard,
 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -35,7 +36,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Switch } from "@/components/ui/switch";
-import { CSRF_HEADER } from "@/lib/auth/csrf";
+import { CSRF_HEADER } from "@/lib/auth/csrf-constants";
+import { DashboardLayout, type DashboardNavItem } from "@/components/dashboard/DashboardLayout";
 import { formatDateTime, attendanceLabel } from "@/lib/parent-ui/format";
 
 // === Types (match the API response shapes) ==============================
@@ -85,6 +87,8 @@ interface CoachPortalProps {
   selectedAcademyId: string;
   onSelectAcademy: (academyId: string) => void;
   onSessionExpired: () => void;
+  userEmail: string;
+  onLogout: () => void;
 }
 
 type LoadState =
@@ -92,7 +96,7 @@ type LoadState =
   | { status: "success"; academyId: string; occurrences: CoachOccurrence[] }
   | { status: "error"; academyId: string; message: string };
 
-export function CoachPortal({ memberships, selectedAcademyId, onSelectAcademy, onSessionExpired }: CoachPortalProps) {
+export function CoachPortal({ memberships, selectedAcademyId, onSelectAcademy, onSessionExpired, userEmail, onLogout }: CoachPortalProps) {
   const coachMemberships = memberships.filter((m) => m.role === "coach");
   const effectiveAcademyId = selectedAcademyId || coachMemberships[0]?.academyId || "";
   const [state, setState] = useState<LoadState>({ status: "loading", academyId: effectiveAcademyId });
@@ -115,43 +119,76 @@ export function CoachPortal({ memberships, selectedAcademyId, onSelectAcademy, o
     if (effectiveAcademyId) void loadOccurrences(effectiveAcademyId);
   }, [effectiveAcademyId, loadOccurrences]);
 
+  const navItems: DashboardNavItem[] = selected
+    ? [
+        { id: "schedule", label: "Jadwal latihan", icon: CalendarDays },
+        { id: "session", label: selected.class_name, icon: ClipboardList, group: "Sesi dipilih" },
+      ]
+    : [{ id: "schedule", label: "Jadwal latihan", icon: LayoutDashboard }];
+  const topActions = (
+    <>
+      {coachMemberships.length > 1 && (
+        <select
+          aria-label="Pilih akademi"
+          value={effectiveAcademyId}
+          onChange={(e) => onSelectAcademy(e.target.value)}
+          className="h-10 max-w-36 rounded-xl border border-[#08251a]/10 bg-white px-2 text-xs text-[#315d3d] sm:max-w-none sm:px-3 sm:text-sm"
+        >
+          {coachMemberships.map((m) => (
+            <option key={m.academyId} value={m.academyId}>Akademi {m.academyId.slice(0, 8)}</option>
+          ))}
+        </select>
+      )}
+      {!selected && (
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => void loadOccurrences(effectiveAcademyId)}
+          className="h-10 gap-2 border-[#08251a]/10 bg-white text-[#315d3d]"
+        >
+          <RefreshCw className="h-4 w-4" aria-hidden />
+          <span className="hidden sm:inline">Muat ulang</span>
+        </Button>
+      )}
+    </>
+  );
+
   if (selected) {
     return (
-      <CoachSessionDetail
-        academyId={effectiveAcademyId}
-        occurrence={selected}
-        onBack={() => setSelected(null)}
-        onSessionExpired={onSessionExpired}
-      />
+      <DashboardLayout
+        roleLabel="Portal Pelatih"
+        userEmail={userEmail}
+        title={selected.class_name}
+        description="Kelola daftar pemain, kehadiran, dan rencana latihan sesi ini."
+        navItems={navItems}
+        activeItem="session"
+        onNavigate={() => setSelected(null)}
+        onLogout={onLogout}
+        topActions={topActions}
+      >
+        <CoachSessionDetail
+          academyId={effectiveAcademyId}
+          occurrence={selected}
+          onBack={() => setSelected(null)}
+          onSessionExpired={onSessionExpired}
+        />
+      </DashboardLayout>
     );
   }
 
   return (
-    <div className="space-y-4">
-      {coachMemberships.length > 1 && (
-        <div className="flex items-center gap-2">
-          <Label>Akademi:</Label>
-          <select
-            value={effectiveAcademyId}
-            onChange={(e) => onSelectAcademy(e.target.value)}
-            className="rounded-md border bg-background px-2 py-1 text-sm"
-          >
-            {coachMemberships.map((m) => (
-              <option key={m.academyId} value={m.academyId}>{m.academyId.slice(0, 8)}</option>
-            ))}
-          </select>
-        </div>
-      )}
-
-      <div className="flex items-center justify-between">
-        <h2 className="text-lg font-semibold flex items-center gap-2">
-          <CalendarDays className="h-5 w-5" aria-hidden /> Jadwal Latihan Saya
-        </h2>
-        <Button variant="outline" size="sm" onClick={() => void loadOccurrences(effectiveAcademyId)} className="gap-2">
-          <RefreshCw className="h-4 w-4" aria-hidden /> Muat Ulang
-        </Button>
-      </div>
-
+    <DashboardLayout
+      roleLabel="Portal Pelatih"
+      userEmail={userEmail}
+      title="Jadwal Latihan Saya"
+      description="Lihat sesi yang ditugaskan dan siapkan latihan tim."
+      navItems={navItems}
+      activeItem="schedule"
+      onNavigate={() => undefined}
+      onLogout={onLogout}
+      topActions={topActions}
+    >
+      <div className="space-y-4">
       {state.status === "loading" && (
         <div className="flex items-center justify-center py-12 text-muted-foreground">
           <Loader2 className="mr-2 h-5 w-5 animate-spin" aria-hidden /> Memuat…
@@ -200,7 +237,8 @@ export function CoachPortal({ memberships, selectedAcademyId, onSelectAcademy, o
           })}
         </div>
       )}
-    </div>
+      </div>
+    </DashboardLayout>
   );
 }
 

@@ -13,7 +13,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { CSRF_HEADER } from "@/lib/auth/csrf";
+import { CSRF_HEADER } from "@/lib/auth/csrf-constants";
 
 // === Types (match the actual API response) ===============================
 

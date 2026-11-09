@@ -38,11 +38,11 @@ import { AppError } from "@/lib/errors";
 
 const ACADEMY_SLUG = "default";
 
-async function promptPassword(): Promise<string> {
+async function promptPassword(prompt = "Enter initial admin password (min 8 chars): "): Promise<string> {
   if (!process.stdin.isTTY || typeof process.stdin.setRawMode !== "function") {
     throw new AppError({ code: "CONFIG_INVALID", message: "Admin provisioning requires an interactive TTY for hidden password input." });
   }
-  process.stdout.write("Enter initial admin password (min 8 chars): ");
+  process.stdout.write(prompt);
   process.stdin.setRawMode(true);
   process.stdin.resume();
   process.stdin.setEncoding("utf8");
@@ -76,6 +76,12 @@ async function promptPassword(): Promise<string> {
 }
 
 async function main() {
+  const args = process.argv.slice(2);
+  const resetPassword = args.length === 1 && args[0] === "--reset-password";
+  if (args.length > 0 && !resetPassword) {
+    throw new AppError({ code: "CONFIG_INVALID", message: "Usage: provision-admin [--reset-password]" });
+  }
+
   const env = loadEnv();
   const email = env.INITIAL_ADMIN_EMAIL.trim().toLowerCase();
   if (!email) throw new AppError({ code: "CONFIG_INVALID", message: "INITIAL_ADMIN_EMAIL env var is required." });
@@ -88,6 +94,12 @@ async function main() {
 
   const password = await promptPassword();
   if (password.length < 8) throw new AppError({ code: "VALIDATION_FAILED", message: "Password must be at least 8 characters." });
+  if (resetPassword) {
+    const confirmation = await promptPassword("Confirm new admin password: ");
+    if (password !== confirmation) {
+      throw new AppError({ code: "VALIDATION_FAILED", message: "The passwords do not match." });
+    }
+  }
 
   const db = getDb();
   try {
@@ -98,11 +110,45 @@ async function main() {
     const hash = await hashPassword(password);
     const result = await db.withTxSerializable(async (tx) => {
       const existing = await tx.query<{ id: string }>("SELECT id FROM users WHERE lower(email) = $1 FOR UPDATE;", [email]);
+      if (resetPassword && !existing.rows[0]) {
+        throw new AppError({
+          code: "CONFIG_INVALID",
+          message: "Cannot reset the configured admin password because the user does not exist. Run provisioning without --reset-password first.",
+        });
+      }
       let userId = existing.rows[0]?.id;
       if (!userId) {
         userId = randomUUID();
         await tx.query("INSERT INTO users (id, email, status, must_change_password) VALUES ($1, $2, 'active', true);", [userId, email]);
         await tx.query("INSERT INTO user_credentials (user_id, argon2id_hash, argon2_params) VALUES ($1, $2, $3);", [userId, hash, JSON.stringify(paramsToJson())]);
+      } else if (resetPassword) {
+        await tx.query(
+          `INSERT INTO user_credentials (user_id, argon2id_hash, argon2_params)
+           VALUES ($1, $2, $3)
+           ON CONFLICT (user_id) DO UPDATE
+             SET argon2id_hash = EXCLUDED.argon2id_hash,
+                 argon2_params = EXCLUDED.argon2_params,
+                 updated_at = now();`,
+          [userId, hash, JSON.stringify(paramsToJson())],
+        );
+        await tx.query(
+          `UPDATE users
+              SET must_change_password = false,
+                  failed_login_count = 0,
+                  locked_until = NULL,
+                  last_pw_change_at = now(),
+                  updated_at = now()
+            WHERE id = $1;`,
+          [userId],
+        );
+        await tx.query(
+          "UPDATE sessions SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL;",
+          [userId],
+        );
+        await tx.query(
+          "DELETE FROM login_attempts WHERE identifier = $1 AND identifier_type = 'email';",
+          [email],
+        );
       }
       const membership = await tx.query(
         `INSERT INTO academy_memberships (id, user_id, academy_id, role, status)
@@ -110,9 +156,19 @@ async function main() {
          ON CONFLICT (user_id, academy_id, role) DO NOTHING RETURNING id;`,
         [randomUUID(), userId, academyId],
       );
-      return { createdUser: !existing.rows[0], createdMembership: membership.rowCount > 0 };
+      return {
+        createdUser: !existing.rows[0],
+        resetPassword: Boolean(existing.rows[0] && resetPassword),
+        createdMembership: membership.rowCount > 0,
+      };
     });
-    console.info(result.createdUser ? "Created initial Admin user." : "User already exists; password was not changed.");
+    console.info(
+      result.createdUser
+        ? "Created initial Admin user."
+        : result.resetPassword
+          ? "Reset the existing Admin password and cleared its login lockout."
+          : "User already exists; password was not changed.",
+    );
     console.info(result.createdMembership ? "Created Admin academy membership." : "Admin membership already exists.");
     console.info("PROVISION_OK — log in with the configured initial admin account.");
   } finally {

@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
-import { Database, LogIn, LogOut, KeyRound, AlertCircle, CheckCircle2 } from "lucide-react";
+import { Database, LogIn, KeyRound, AlertCircle, CheckCircle2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -61,9 +61,11 @@ function dashboardPathFor(
 export function AuthShell({
   mode,
   initialPublicView = "landing",
+  publicAcademyId = DEFAULT_LANDING_ACADEMY_ID,
 }: {
   mode: AuthShellMode;
   initialPublicView?: "landing" | "registerForm";
+  publicAcademyId?: string;
 }) {
   const router = useRouter();
   const [view, setView] = useState<View>(
@@ -76,6 +78,10 @@ export function AuthShell({
   const [pwState, setPwState] = useState<FormState>(INITIAL_FORM);
   // Shared academy selection across admin + parent views.
   const [selectedAcademyId, setSelectedAcademyId] = useState("");
+  const isAuthenticatedDashboard =
+    view === "loggedIn" &&
+    principal !== null &&
+    principal.memberships.some((membership) => membership.role === mode);
 
   // Initial session load. Inlined IIFE so the React Compiler doesn't flag
   // a useCallback dependency on setState (the setState calls happen after
@@ -229,6 +235,7 @@ export function AuthShell({
   if (mode === "public" && view === "landing") {
     return (
       <AcademyLandingPage
+        academyId={publicAcademyId}
         onLoginClick={() => setView("loginForm")}
         onRegisterClick={() => setView("registerForm")}
         onCheckStatusClick={() => setView("applicationStatus")}
@@ -237,8 +244,8 @@ export function AuthShell({
   }
 
   return (
-    <div className="min-h-screen flex flex-col bg-background text-foreground">
-      <header className="border-b bg-card">
+    <div className={isAuthenticatedDashboard ? "min-h-screen" : "min-h-screen flex flex-col bg-background text-foreground"}>
+      {!isAuthenticatedDashboard && <header className="border-b bg-card">
         <div className="mx-auto max-w-5xl px-4 py-6 sm:px-6">
           <div className="flex items-center gap-3">
             <div className="rounded-lg bg-primary/10 p-2 text-primary">
@@ -254,9 +261,9 @@ export function AuthShell({
             </div>
           </div>
         </div>
-      </header>
+      </header>}
 
-      <main className="mx-auto w-full max-w-5xl flex-1 px-4 py-6 sm:px-6 sm:py-8">
+      <main className={isAuthenticatedDashboard ? "w-full" : "mx-auto w-full max-w-5xl flex-1 px-4 py-6 sm:px-6 sm:py-8"}>
         {view === "loading" && (
           <Card>
             <CardContent className="p-6">
@@ -267,7 +274,7 @@ export function AuthShell({
 
         {view === "registerForm" && mode === "public" && (
           <PublicRegistrationForm
-            academyId={DEFAULT_LANDING_ACADEMY_ID}
+            academyId={publicAcademyId}
             academyName="Futsal Academy"
             onBack={() => setView("landing")}
           />
@@ -396,77 +403,43 @@ export function AuthShell({
           </Card>
         )}
 
-        {view === "loggedIn" && principal && (
-          <div className="space-y-6">
-            <Card>
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2">
-                  <CheckCircle2 className="h-5 w-5 text-emerald-600" aria-hidden />
-                  Tervalidasi
-                </CardTitle>
-              </CardHeader>
-              <CardContent>
-                <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-                  <div>
-                    <p className="text-sm text-muted-foreground">Masuk sebagai</p>
-                    <p className="text-base font-medium">{principal.email}</p>
-                    <ul className="mt-2 space-y-0.5">
-                      {principal.memberships.map((m) => (
-                        <li key={`${m.academyId}-${m.role}`} className="text-sm">
-                          <span className="font-medium capitalize">{m.role}</span>
-                          {" · akademi "}
-                          <code className="rounded bg-muted px-1 py-0.5 text-xs">
-                            {m.academyId.slice(0, 8)}
-                          </code>
-                        </li>
-                      ))}
-                      {principal.memberships.length === 0 && (
-                        <li className="text-sm text-muted-foreground">Tidak ada keanggotaan aktif</li>
-                      )}
-                    </ul>
-                  </div>
-                  <div className="flex-shrink-0">
-                    <Button variant="outline" onClick={handleLogout} className="gap-2">
-                      <LogOut className="h-4 w-4" aria-hidden /> Keluar
-                    </Button>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
-
-            {/* Role-based views */}
-            {mode === "admin" && principal.memberships.some((m) => m.role === "admin") ? (
-              <AdminShell
-                memberships={principal.memberships}
-                selectedAcademyId={selectedAcademyId}
-                onSelectAcademy={setSelectedAcademyId}
-              />
-            ) : mode === "parent" && principal.memberships.some((m) => m.role === "parent") ? (
-              <ParentPortal
-                memberships={principal.memberships}
-                selectedAcademyId={selectedAcademyId}
-                onSelectAcademy={setSelectedAcademyId}
-                onSessionExpired={handleSessionExpired}
-              />
-            ) : mode === "coach" && principal.memberships.some((m) => m.role === "coach") ? (
-              <CoachPortal
-                memberships={principal.memberships}
-                selectedAcademyId={selectedAcademyId}
-                onSelectAcademy={setSelectedAcademyId}
-                onSessionExpired={handleSessionExpired}
-              />
-            ) : (
-              <StudentListNoAccess />
-            )}
-          </div>
+        {view === "loggedIn" && principal && mode === "admin" && principal.memberships.some((m) => m.role === "admin") && (
+          <AdminShell
+            memberships={principal.memberships}
+            selectedAcademyId={selectedAcademyId}
+            onSelectAcademy={setSelectedAcademyId}
+            userEmail={principal.email}
+            onLogout={handleLogout}
+          />
         )}
+        {view === "loggedIn" && principal && mode === "parent" && principal.memberships.some((m) => m.role === "parent") && (
+          <ParentPortal
+            memberships={principal.memberships}
+            selectedAcademyId={selectedAcademyId}
+            onSelectAcademy={setSelectedAcademyId}
+            onSessionExpired={handleSessionExpired}
+            userEmail={principal.email}
+            onLogout={handleLogout}
+          />
+        )}
+        {view === "loggedIn" && principal && mode === "coach" && principal.memberships.some((m) => m.role === "coach") && (
+          <CoachPortal
+            memberships={principal.memberships}
+            selectedAcademyId={selectedAcademyId}
+            onSelectAcademy={setSelectedAcademyId}
+            onSessionExpired={handleSessionExpired}
+            userEmail={principal.email}
+            onLogout={handleLogout}
+          />
+        )}
+        {view === "loggedIn" && principal && !isAuthenticatedDashboard && <StudentListNoAccess />}
       </main>
 
-      <footer className="border-t bg-card mt-auto">
+      {!isAuthenticatedDashboard && <footer className="border-t bg-card mt-auto">
         <div className="mx-auto max-w-5xl px-4 py-4 text-xs text-muted-foreground sm:px-6">
           Futsal Academy Management System · Argon2id + opaque session tokens + CSRF + DB-backed rate limiting
         </div>
-      </footer>
+      </footer>}
     </div>
   );
 }

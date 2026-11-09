@@ -78,6 +78,26 @@
   --sidebar-ring: oklch(0.708 0 0);
 }
 
+.dashboard-theme {
+  --background: #f5f5ef;
+  --foreground: #08251a;
+  --card: #ffffff;
+  --card-foreground: #08251a;
+  --popover: #ffffff;
+  --popover-foreground: #08251a;
+  --primary: #315d3d;
+  --primary-foreground: #f5f5ef;
+  --secondary: #e9eee7;
+  --secondary-foreground: #193c2a;
+  --muted: #e9eee7;
+  --muted-foreground: #607166;
+  --accent: #c8e600;
+  --accent-foreground: #08251a;
+  --border: rgb(8 37 26 / 12%);
+  --input: rgb(8 37 26 / 16%);
+  --ring: #547b25;
+}
+
 .dark {
   --background: oklch(0.145 0 0);
   --foreground: oklch(0.985 0 0);

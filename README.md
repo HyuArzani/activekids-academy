@@ -66,6 +66,11 @@ $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
 $rng.Dispose()
 ```
 
+```terminal
+openssl rand -hex 32
+openssl rand -hex 32
+```
+
 Use one generated value for each secret. Leave `TEST_DATABASE_URL` empty; it is
 for tests and takes precedence over `DATABASE_URL` when set. Do not put
 Supabase credentials in `NEXT_PUBLIC_*` variables. `.env` is ignored by Git.
@@ -111,6 +116,15 @@ The configured `INITIAL_ADMIN_EMAIL` is treated as the super admin and can
 sign in directly with this password. Keep that value set in `.env` while
 running the app. Other provisioned accounts are still required to change
 their initial password.
+
+Provisioning does not replace the password for an existing account. To
+intentionally reset the configured admin's password, use the explicit reset
+mode; it prompts twice without echoing the password, clears that account's
+login lockout, and revokes its active sessions:
+
+```powershell
+bun run --bun scripts/provision-admin.ts --reset-password
+```
 
 ### 7. Start the app
 

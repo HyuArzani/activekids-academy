@@ -1,12 +1,12 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
-import { Users, RefreshCw, Loader2, AlertCircle, ArrowLeft, CalendarDays, Package, ClipboardCheck, ClipboardList, FileText, Video } from "lucide-react";
+import { Users, RefreshCw, Loader2, AlertCircle, ArrowLeft, CalendarDays, Package, ClipboardCheck, ClipboardList, FileText, Video, LayoutDashboard } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { DashboardLayout, type DashboardNavItem } from "@/components/dashboard/DashboardLayout";
 import { formatDateTime } from "@/lib/parent-ui/format";
 import { ChildSchedule } from "./ChildSchedule";
 import { ChildPackages } from "./ChildPackages";
@@ -41,6 +41,15 @@ type LoadState =
 
 type ChildTab = "schedule" | "packages" | "attendance" | "reports" | "videos" | "plans";
 
+const CHILD_TABS: { id: ChildTab; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
+  { id: "schedule", label: "Jadwal", icon: CalendarDays },
+  { id: "packages", label: "Paket", icon: Package },
+  { id: "attendance", label: "Kehadiran", icon: ClipboardCheck },
+  { id: "reports", label: "Laporan", icon: FileText },
+  { id: "videos", label: "Video", icon: Video },
+  { id: "plans", label: "Rencana", icon: ClipboardList },
+];
+
 // === Main component =======================================================
 
 interface ParentPortalProps {
@@ -48,9 +57,11 @@ interface ParentPortalProps {
   selectedAcademyId: string;
   onSelectAcademy: (academyId: string) => void;
   onSessionExpired: () => void;
+  userEmail: string;
+  onLogout: () => void;
 }
 
-export function ParentPortal({ memberships, selectedAcademyId, onSelectAcademy, onSessionExpired }: ParentPortalProps) {
+export function ParentPortal({ memberships, selectedAcademyId, onSelectAcademy, onSessionExpired, userEmail, onLogout }: ParentPortalProps) {
   const parentMemberships = memberships.filter((m) => m.role === "parent");
   const [state, setState] = useState<LoadState>({ status: "loading", academyId: selectedAcademyId });
   // Track which academy the child selection belongs to. When the academy
@@ -123,12 +134,78 @@ export function ParentPortal({ memberships, selectedAcademyId, onSelectAcademy, 
   const showLoading = state.status === "loading" || isStale;
   const showError = !isStale && state.status === "error";
   const showSuccess = !isStale && state.status === "success" && state.data;
+  const selectedChild =
+    selectedStudentId && showSuccess
+      ? state.data.children.find((child) => child.studentId === selectedStudentId) ?? null
+      : null;
+  const navItems: DashboardNavItem[] = [
+    { id: "overview", label: "Ringkasan", icon: LayoutDashboard },
+    ...(showSuccess
+      ? state.data.children.map((child) => ({
+          id: `child:${child.studentId}`,
+          label: child.fullName,
+          icon: Users,
+          group: "Anak",
+        }))
+      : []),
+    ...(selectedChild
+      ? CHILD_TABS.map((tab) => ({
+          id: `tab:${tab.id}`,
+          label: tab.label,
+          icon: tab.icon,
+          group: selectedChild.fullName,
+        }))
+      : []),
+  ];
+  const activeItem = selectedChild ? `tab:${activeTab}` : "overview";
+  const topActions =
+    parentMemberships.length > 1 ? (
+      <Select value={selectedAcademyId} onValueChange={onSelectAcademy}>
+        <SelectTrigger id="parent-academy-select" aria-label="Pilih akademi" className="h-10 w-[156px] border-[#08251a]/10 bg-white sm:w-[220px]">
+          <SelectValue placeholder="Pilih akademi" />
+        </SelectTrigger>
+        <SelectContent>
+          {parentMemberships.map((m) => (
+            <SelectItem key={m.academyId} value={m.academyId}>
+              Akademi {m.academyId.slice(0, 8)}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    ) : (
+      <span className="rounded-full border border-[#08251a]/10 bg-white px-3 py-2 text-xs font-medium text-[#526258]">
+        Akademi {selectedAcademyId.slice(0, 8)}
+      </span>
+    );
+  const handleNavigate = (id: string) => {
+    if (id === "overview") {
+      setSelectedStudent(null);
+      return;
+    }
+    if (id.startsWith("child:")) {
+      setSelectedStudent({ studentId: id.slice("child:".length), academyId: selectedAcademyId });
+      setActiveTab("schedule");
+      return;
+    }
+    const tab = CHILD_TABS.find((item) => `tab:${item.id}` === id);
+    if (tab) setActiveTab(tab.id);
+  };
 
   // === Child detail view ===
-  if (selectedStudentId && showSuccess && state.data) {
-    const child = state.data.children.find((c) => c.studentId === selectedStudentId);
-    if (child) {
+  if (selectedChild && showSuccess && state.data) {
+      const child = selectedChild;
       return (
+        <DashboardLayout
+          roleLabel="Portal Wali"
+          userEmail={userEmail}
+          title={child.fullName}
+          description={child.className ?? "Kelas belum ditentukan"}
+          navItems={navItems}
+          activeItem={activeItem}
+          onNavigate={handleNavigate}
+          onLogout={onLogout}
+          topActions={topActions}
+        >
         <div className="space-y-4">
           <div className="flex items-center gap-3">
             <Button variant="ghost" size="sm" onClick={() => setSelectedStudent(null)} className="gap-2">
@@ -138,16 +215,6 @@ export function ParentPortal({ memberships, selectedAcademyId, onSelectAcademy, 
               <h2 className="text-lg font-semibold">{child.fullName}</h2>
               <p className="text-sm text-muted-foreground">{child.className ?? "Kelas belum ditentukan"}</p>
             </div>
-          </div>
-
-          {/* Tab navigation */}
-          <div className="flex gap-1 overflow-x-auto rounded-lg bg-muted p-1" role="tablist" aria-label="Bagian anak">
-            <TabButton active={activeTab === "schedule"} onClick={() => setActiveTab("schedule")} icon={CalendarDays} label="Jadwal" />
-            <TabButton active={activeTab === "packages"} onClick={() => setActiveTab("packages")} icon={Package} label="Paket" />
-            <TabButton active={activeTab === "attendance"} onClick={() => setActiveTab("attendance")} icon={ClipboardCheck} label="Kehadiran" />
-            <TabButton active={activeTab === "reports"} onClick={() => setActiveTab("reports")} icon={FileText} label="Laporan" />
-            <TabButton active={activeTab === "videos"} onClick={() => setActiveTab("videos")} icon={Video} label="Video" />
-            <TabButton active={activeTab === "plans"} onClick={() => setActiveTab("plans")} icon={ClipboardList} label="Rencana" />
           </div>
 
           {/* Tab content */}
@@ -172,32 +239,24 @@ export function ParentPortal({ memberships, selectedAcademyId, onSelectAcademy, 
             )}
           </div>
         </div>
+        </DashboardLayout>
       );
-    }
   }
 
   // === Overview / dashboard view ===
   return (
-    <div className="space-y-4">
-      {/* Academy selector (if multiple) */}
-      {parentMemberships.length > 1 && (
-        <div className="space-y-1.5">
-          <Label htmlFor="parent-academy-select" className="text-xs text-muted-foreground">Akademi</Label>
-          <Select value={selectedAcademyId} onValueChange={onSelectAcademy}>
-            <SelectTrigger id="parent-academy-select" className="w-full sm:w-72">
-              <SelectValue placeholder="Pilih akademi" />
-            </SelectTrigger>
-            <SelectContent>
-              {parentMemberships.map((m) => (
-                <SelectItem key={m.academyId} value={m.academyId}>
-                  Akademi {m.academyId.slice(0, 8)}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-      )}
-
+    <DashboardLayout
+      roleLabel="Portal Wali"
+      userEmail={userEmail}
+      title="Ringkasan Keluarga"
+      description="Pantau jadwal, kehadiran, dan perkembangan anak Anda."
+      navItems={navItems}
+      activeItem={activeItem}
+      onNavigate={handleNavigate}
+      onLogout={onLogout}
+      topActions={topActions}
+    >
+      <div className="space-y-4">
       {showLoading && (
         <Card>
           <CardContent className="flex items-center gap-3 p-6">
@@ -229,25 +288,8 @@ export function ParentPortal({ memberships, selectedAcademyId, onSelectAcademy, 
           onSelectChild={(id) => { setSelectedStudent({ studentId: id, academyId: selectedAcademyId }); setActiveTab("schedule"); }}
         />
       )}
-    </div>
-  );
-}
-
-// === Tab button sub-component ============================================
-
-function TabButton({ active, onClick, icon: Icon, label }: { active: boolean; onClick: () => void; icon: React.ComponentType<{ className?: string }>; label: string }) {
-  return (
-    <button
-      type="button"
-      role="tab"
-      aria-selected={active}
-      onClick={onClick}
-      className={`flex items-center gap-2 rounded-md px-3 py-1.5 text-sm font-medium transition-colors whitespace-nowrap ${
-        active ? "bg-background text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"
-      }`}
-    >
-      <Icon className="h-4 w-4" aria-hidden /> {label}
-    </button>
+      </div>
+    </DashboardLayout>
   );
 }
 

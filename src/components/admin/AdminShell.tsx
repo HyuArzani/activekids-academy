@@ -52,7 +52,8 @@ import { PaymentsManagement } from "@/components/admin/PaymentsManagement";
 import { RegistrationsManagement } from "@/components/admin/RegistrationsManagement";
 import { WebsiteContentManagement } from "@/components/admin/WebsiteContentManagement";
 import { ReportsManagement } from "@/components/admin/ReportsManagement";
-import { CSRF_HEADER } from "@/lib/auth/csrf";
+import { DashboardLayout } from "@/components/dashboard/DashboardLayout";
+import { CSRF_HEADER } from "@/lib/auth/csrf-constants";
 import { toast } from "@/hooks/use-toast";
 
 // Shared fetch helper for mutations (CSRF + JSON)
@@ -135,16 +136,16 @@ type AdminSection =
 
 // === Navigation config ===================================================
 
-const NAV_ITEMS: { id: AdminSection; label: string; icon: React.ComponentType<{ className?: string }>; enabled: boolean }[] = [
-  { id: "dashboard", label: "Dasbor", icon: LayoutDashboard, enabled: true },
-  { id: "students", label: "Siswa", icon: Users, enabled: true },
-  { id: "classes", label: "Kelas", icon: CalendarDays, enabled: true },
-  { id: "packages", label: "Paket", icon: Package, enabled: true },
-  { id: "attendance", label: "Kehadiran", icon: ClipboardCheck, enabled: true },
-  { id: "payments", label: "Pembayaran & Pengeluaran", icon: Wallet, enabled: true },
-  { id: "registrations", label: "Pendaftaran", icon: FileCheck, enabled: true },
-  { id: "reports", label: "Laporan", icon: FileText, enabled: true },
-  { id: "website", label: "Konten Website", icon: Globe, enabled: true },
+const NAV_ITEMS: { id: AdminSection; label: string; icon: React.ComponentType<{ className?: string }>; group?: string }[] = [
+  { id: "dashboard", label: "Ringkasan", icon: LayoutDashboard, group: "Utama" },
+  { id: "students", label: "Siswa", icon: Users, group: "Akademi" },
+  { id: "classes", label: "Kelas", icon: CalendarDays, group: "Akademi" },
+  { id: "packages", label: "Paket", icon: Package, group: "Akademi" },
+  { id: "attendance", label: "Kehadiran", icon: ClipboardCheck, group: "Operasional" },
+  { id: "payments", label: "Pembayaran & Pengeluaran", icon: Wallet, group: "Operasional" },
+  { id: "registrations", label: "Pendaftaran", icon: FileCheck, group: "Operasional" },
+  { id: "reports", label: "Laporan", icon: FileText, group: "Operasional" },
+  { id: "website", label: "Konten Website", icon: Globe, group: "Publikasi" },
 ];
 
 /** Translate an API gender value (male/female/unspecified) for display. */
@@ -161,80 +162,53 @@ interface AdminShellProps {
   memberships: { academyId: string; role: string }[];
   selectedAcademyId: string;
   onSelectAcademy: (academyId: string) => void;
+  userEmail: string;
+  onLogout: () => void;
 }
 
-export function AdminShell({ memberships, selectedAcademyId, onSelectAcademy }: AdminShellProps) {
+export function AdminShell({ memberships, selectedAcademyId, onSelectAcademy, userEmail, onLogout }: AdminShellProps) {
   const [section, setSection] = useState<AdminSection>("dashboard");
   const adminMemberships = memberships.filter((m) => m.role === "admin");
+  const activeItem = NAV_ITEMS.find((item) => item.id === section);
+  const topActions = adminMemberships.length > 1 ? (
+    <Select value={selectedAcademyId} onValueChange={onSelectAcademy}>
+      <SelectTrigger id="admin-academy-select" aria-label="Pilih akademi" className="h-10 w-[156px] border-[#08251a]/10 bg-white sm:w-[220px]">
+        <SelectValue placeholder="Pilih akademi" />
+      </SelectTrigger>
+      <SelectContent>
+        {adminMemberships.map((m) => (
+          <SelectItem key={m.academyId} value={m.academyId}>
+            Akademi {m.academyId.slice(0, 8)}
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
+  ) : (
+    <span className="rounded-full border border-[#08251a]/10 bg-white px-3 py-2 text-xs font-medium text-[#526258]">
+      Akademi {selectedAcademyId.slice(0, 8)}
+    </span>
+  );
 
   return (
-    <div className="space-y-4">
-      {/* Academy selector */}
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-        <div className="space-y-1.5">
-          {adminMemberships.length > 1 ? (
-            <>
-              <Label htmlFor="admin-academy-select" className="text-xs text-muted-foreground">
-                Akademi
-              </Label>
-              <Select value={selectedAcademyId} onValueChange={onSelectAcademy}>
-                <SelectTrigger id="admin-academy-select" className="w-full sm:w-72">
-                  <SelectValue placeholder="Pilih akademi" />
-                </SelectTrigger>
-                <SelectContent>
-                  {adminMemberships.map((m) => (
-                    <SelectItem key={m.academyId} value={m.academyId}>
-                      Akademi {m.academyId.slice(0, 8)}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </>
-          ) : (
-            <p className="text-sm text-muted-foreground">
-              Akademi{" "}
-              <code className="rounded bg-muted px-1 py-0.5 text-xs">
-                {selectedAcademyId.slice(0, 8)}
-              </code>
-            </p>
-          )}
-        </div>
-      </div>
-
-      {/* Navigation */}
-      <div className="flex gap-1 overflow-x-auto rounded-lg bg-muted p-1" role="tablist" aria-label="Bagian admin">
-        {NAV_ITEMS.map((item) => {
-          const Icon = item.icon;
-          return (
-            <button
-              key={item.id}
-              type="button"
-              role="tab"
-              aria-selected={section === item.id}
-              disabled={!item.enabled}
-              onClick={() => item.enabled && setSection(item.id)}
-              className={`flex items-center gap-2 rounded-md px-3 py-1.5 text-sm font-medium transition-colors whitespace-nowrap ${
-                section === item.id
-                  ? "bg-background text-foreground shadow-sm"
-                  : item.enabled
-                    ? "text-muted-foreground hover:text-foreground"
-                    : "text-muted-foreground/50 cursor-not-allowed"
-              }`}
-            >
-              <Icon className="h-4 w-4" aria-hidden /> {item.label}
-              {!item.enabled && <span className="text-xs">(segera)</span>}
-            </button>
-          );
-        })}
-      </div>
-
-      {/* Section content */}
-      <div className="min-h-[300px]">
+    <DashboardLayout
+      roleLabel="Administrator"
+      userEmail={userEmail}
+      title={activeItem?.label ?? "Ringkasan"}
+      description={section === "dashboard" ? "Pantau aktivitas dan kondisi akademi dalam satu tempat." : undefined}
+      navItems={NAV_ITEMS}
+      activeItem={section}
+      onNavigate={(id) => {
+        const nextSection = NAV_ITEMS.find((item) => item.id === id)?.id;
+        if (nextSection) setSection(nextSection);
+      }}
+      onLogout={onLogout}
+      topActions={topActions}
+    >
+      <div className="min-h-75">
         {section === "dashboard" && (
           <DashboardOverview
             memberships={memberships}
             selectedAcademyId={selectedAcademyId}
-            onSelectAcademy={onSelectAcademy}
           />
         )}
         {section === "students" && (
@@ -274,7 +248,7 @@ export function AdminShell({ memberships, selectedAcademyId, onSelectAcademy }: 
           </Card>
         )}
       </div>
-    </div>
+    </DashboardLayout>
   );
 }
 

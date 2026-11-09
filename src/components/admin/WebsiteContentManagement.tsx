@@ -36,7 +36,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { CSRF_HEADER } from "@/lib/auth/csrf";
+import { CSRF_HEADER } from "@/lib/auth/csrf-constants";
 import { toast } from "@/hooks/use-toast";
 
 // ============================================================================
@@ -376,14 +376,14 @@ function LandingPageEditor({ academyId }: { academyId: string }) {
     );
   }
 
-  const isPublished = page?.publishedPublicationId !== null;
+  const isPublished = Boolean(page?.publishedPublicationId);
 
   return (
     <div className="space-y-4">
       {/* Status + actions bar */}
       <Card>
-        <CardContent className="flex items-center justify-between p-4">
-          <div className="flex items-center gap-3">
+        <CardContent className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex flex-wrap items-center gap-2">
             {isPublished ? (
               <Badge className="bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-400">
                 <Check className="h-3 w-3 mr-1" aria-hidden /> Telah diterbitkan
@@ -402,7 +402,17 @@ function LandingPageEditor({ academyId }: { academyId: string }) {
               </Badge>
             )}
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <a
+              href={`/domain?academyId=${encodeURIComponent(academyId)}`}
+              target="_blank"
+              rel="noreferrer"
+              title="Halaman publik hanya menampilkan konten yang sudah diterbitkan."
+              className="inline-flex h-9 items-center gap-2 rounded-md border border-input bg-background px-3 text-sm font-medium transition-colors hover:bg-accent hover:text-accent-foreground"
+            >
+              <ExternalLink className="h-4 w-4" aria-hidden />
+              Lihat halaman publik
+            </a>
             <Button
               variant="outline"
               size="sm"
