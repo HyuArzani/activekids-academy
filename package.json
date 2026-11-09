@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "bun run --bun next dev --webpack -p 3001",
-    "build": "bun run --bun next build",
+    "build": "bun run --bun next build --webpack",
     "start": "bun run --bun next start",
     "lint": "eslint .",
     "db:migrate": "bun run --bun scripts/migrate.ts",
@@ -94,5 +94,6 @@
     "tailwindcss": "^4",
     "tw-animate-css": "^1.3.5",
     "typescript": "^5"
-  }
+  },
+  "packageManager": "bun@1.4.0"
 }

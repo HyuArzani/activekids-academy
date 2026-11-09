@@ -11,7 +11,13 @@
 
 [build]
   command = "bun run build"
-  publish = ".next"
+
+[build.environment]
+  NODE_VERSION = "22"
+  BUN_VERSION = "1.4.4"
+
+[[plugins]]
+  package = "@netlify/plugin-nextjs"
 
 # Environment variables required at runtime (set via Netlify UI, NOT here):
 #   DATABASE_URL      — postgresql://user:password@host:5432/dbname?sslmode=require
